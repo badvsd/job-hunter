@@ -37,6 +37,7 @@ from aiogram.types import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     KeyboardButton,
+    MenuButtonWebApp,
     Message,
     ReplyKeyboardMarkup,
     WebAppInfo,
@@ -998,10 +999,24 @@ async def main() -> None:
     dp = Dispatcher()
     dp.include_router(router)
 
+    # Кнопка-меню «Открыть приложение»: Mini App появляется в меню чата сразу,
+    # без необходимости писать /start. Нужен публичный HTTPS-адрес (WEBAPP_URL).
+    try:
+        _menu_url = webapp_url("personal")
+        if _menu_url:
+            await bot.set_chat_menu_button(
+                menu_button=MenuButtonWebApp(text="🕊 Открыть приложение", web_app=WebAppInfo(url=_menu_url))
+            )
+    except Exception as exc:  # noqa: BLE001
+        print(f"[bot] Не удалось установить кнопку-меню: {exc}")
+
     webhook_url = os.environ.get("WEBHOOK_URL", "").strip()
     if webhook_url:
         await _run_webhook(bot, dp, webhook_url)
     else:
+        # Сбрасываем вебхук, если он остался от предыдущего запуска, — иначе
+        # long polling конфликтует («can't use getUpdates while webhook is active»).
+        await bot.delete_webhook(drop_pending_updates=True)
         print("🚀 Вариант А (Personal Job Hunter Bot) запущен и готов к работе!")
         await dp.start_polling(bot)
 

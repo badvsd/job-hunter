@@ -42,4 +42,5 @@ VOLUME ["/data"]
 
 EXPOSE 8085
 
-CMD ["python", "webapp/server.py"]
+# Запускаем лаунчер: он поднимает и сайт (Mini App), и Telegram-бота вместе.
+CMD ["python", "run_all.py"]
