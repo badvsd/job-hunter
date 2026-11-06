@@ -1,0 +1,29 @@
+# Файлы, которые НЕ нужно загружать на Railway (управляет загрузкой через `railway up`).
+# Отличается от .dockerignore: здесь перечислено то, что не должно попасть на хостинг
+# вообще. Dockerfile и исходники ОСТАВЛЯЕМ — они нужны для сборки.
+
+.git
+.gitignore
+.railwayignore
+.dockerignore
+
+# Секреты
+.env
+.env.example
+
+# Кэш и базы данных
+__pycache__
+*.pyc
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+data
+
+# Профиль браузера и скриншоты автопилота
+worker/.browser-profile
+worker/screenshots
+
+# Виртуальное окружение
+.venv
+venv
