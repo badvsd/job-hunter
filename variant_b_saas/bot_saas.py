@@ -59,6 +59,7 @@ from shared_engine import (
     verify_resume_facts,
 )
 from shared_engine.miniapp import webapp_url
+from shared_engine.paths import data_path
 
 # ─────────────────────────────────────────────────────────────────────────────
 # ТАРИФНЫЕ ПЛАНЫ И КВОТЫ SaaS
@@ -104,9 +105,10 @@ REFERRAL_BONUS_RUB = 750  # Как на промо-плитке Сизифа («
 
 # ─────────────────────────────────────────────────────────────────────────────
 # БАЗА ДАННЫХ SaaS (МУЛЬТИПОЛЬЗОВАТЕЛЬСКАЯ + БИЛЛИНГ + РЕФЕРАЛКА)
+# Хранится в папке данных (DATA_DIR), чтобы переживала перезапуски на хостинге.
 # ─────────────────────────────────────────────────────────────────────────────
 
-DB_PATH = Path(__file__).resolve().parent / "saas_platform.db"
+DB_PATH = data_path("saas_platform.db")
 
 
 class SaaSDB:

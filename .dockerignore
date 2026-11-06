@@ -1,0 +1,29 @@
+# Файлы, которые НЕ нужно копировать внутрь Docker-образа (см. Dockerfile).
+# Это ускоряет сборку и не даёт залить секреты и локальные базы в образ.
+
+.git
+.gitignore
+Dockerfile
+.dockerignore
+docker-compose.yml
+
+# Кэш Python
+__pycache__/
+*.pyc
+
+# Локальные данные (на хостинге они в Volume /data)
+data/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+worker/screenshots/
+worker/.browser-profile/
+
+# Секреты
+.env
+.env.example
+
+# Виртуальное окружение
+.venv/
+venv/

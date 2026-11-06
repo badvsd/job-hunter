@@ -1,0 +1,30 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# docker-compose.yml — запуск «Джонатана» в Docker на своём компьютере.
+#
+# Использование:
+#   docker compose up --build
+#   → сайт откроется на http://localhost:8085
+#
+# Данные сохраняются в том Docker (named volume) `app-data`, поэтому не теряются
+# при перезапуске контейнера.
+# ─────────────────────────────────────────────────────────────────────────────
+
+services:
+  app:
+    build: .
+    ports:
+      - "8085:8085"
+    environment:
+      PORT: "8085"
+      HOST: "0.0.0.0"
+      DATA_DIR: "/data"
+      # На сервере нет экрана — браузер автопилота работает в фоне (headless).
+      APPLY_HEADLESS: "1"
+      # Пусто = использовать встроенный Chromium Playwright.
+      APPLY_BROWSER_CHANNEL: ""
+    volumes:
+      - app-data:/data
+    restart: unless-stopped
+
+volumes:
+  app-data:

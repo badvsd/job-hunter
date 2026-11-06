@@ -17,7 +17,7 @@
    письмо, но НЕ отправляет. Вы видите скриншот и решаете сами.
  • `APPLY_DAILY_LIMIT` — сколько откликов в сутки максимум.
  • `APPLY_MIN_DELAY` / `APPLY_MAX_DELAY` — случайная пауза между откликами.
- • Один браузерный профиль (`worker/.browser-profile`) — вход в HH.ru
+ • Один браузерный профиль (`DATA_DIR/browser-profile`) — вход в HH.ru
    сохраняется, повторно логиниться не нужно.
  • Капча, вопросы работодателя, требование входа → статус `manual`,
    скриншот и понятная причина. Воркер не пытается обойти проверку.
@@ -30,6 +30,7 @@ import os
 import random
 import re
 import sqlite3
+import sys
 import time
 from dataclasses import dataclass
 from datetime import date
@@ -38,9 +39,19 @@ from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
 WORKER_DIR = Path(__file__).resolve().parent
-DB_PATH = WORKER_DIR / "apply_queue.db"
-SHOT_DIR = WORKER_DIR / "screenshots"
-PROFILE_DIR = WORKER_DIR / ".browser-profile"
+
+# Доступ к общим модулям проекта (shared_engine) — даже если воркер запускается отдельно.
+ROOT_DIR = WORKER_DIR.parent
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+
+from shared_engine.paths import data_dir, data_path  # noqa: E402
+
+# Данные (база, скриншоты, профиль браузера) хранятся в папке данных (DATA_DIR),
+# чтобы переживать перезапуски на хостинге (Railway Volume).
+DB_PATH = data_path("apply_queue.db")
+SHOT_DIR = data_dir() / "screenshots"
+PROFILE_DIR = data_dir() / "browser-profile"
 
 STATUSES = (
     "queued",     # в очереди, ждёт браузера
@@ -117,6 +128,7 @@ def settings() -> Dict[str, Any]:
         "max_delay": max(0, hi),
         "headless": _bool("APPLY_HEADLESS", 0),
         "profile_dir": (os.environ.get("APPLY_PROFILE_DIR") or str(PROFILE_DIR)).strip(),
+        "browser_channel": (os.environ.get("APPLY_BROWSER_CHANNEL", "chrome")).strip(),
         "timeout_ms": max(5000, _int("APPLY_TIMEOUT_MS", 25000)),
         "answer_questions": _bool("APPLY_ANSWER_QUESTIONS", 1),
         "max_attempts": max(1, min(5, _int("APPLY_MAX_ATTEMPTS", 3))),
@@ -823,7 +835,7 @@ async def apply_hh(task: Dict[str, Any], cfg: Dict[str, Any]) -> ApplyResult:
         async with async_playwright() as p:
             ctx = await p.chromium.launch_persistent_context(
                 user_data_dir=cfg["profile_dir"],
-                channel="chrome",
+                channel=cfg.get("browser_channel") or None,
                 headless=bool(cfg["headless"]),
                 viewport={"width": 1280, "height": 900},
                 locale="ru-RU",

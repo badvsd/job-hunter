@@ -65,12 +65,14 @@ from shared_engine import (
     verify_resume_facts,
 )
 from shared_engine.miniapp import webapp_url
+from shared_engine.paths import data_path
 
 # ─────────────────────────────────────────────────────────────────────────────
 # БАЗА ДАННЫХ ЛИЧНОГО БОТА (SQLite)
+# Хранится в папке данных (DATA_DIR), чтобы переживала перезапуски на хостинге.
 # ─────────────────────────────────────────────────────────────────────────────
 
-DB_PATH = Path(__file__).resolve().parent / "personal_hunter.db"
+DB_PATH = data_path("personal_hunter.db")
 
 
 class PersonalDB:
