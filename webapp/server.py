@@ -67,6 +67,7 @@ from shared_engine import (
 )
 from variant_a_personal.bot_personal import PersonalDB
 from variant_b_saas.bot_saas import PLANS, SaaSDB
+from shared_engine import stripe_pay
 from shared_engine.miniapp import (
     auth_required,
     configured_bots,
@@ -152,6 +153,12 @@ class SettingsReq(BaseModel):
 class BuyPlanReq(BaseModel):
     user_id: int = 10001
     action: str  # 'fast' | 'strong' | 'max' | 'gift'
+
+
+class StripeCheckoutReq(BaseModel):
+    user_id: int = 10001
+    mode: str = "saas"
+    plan: str  # 'fast' | 'strong' | 'max'
 
 
 class TelegramAuthReq(BaseModel):
@@ -701,6 +708,74 @@ async def api_saas_buy(req: BuyPlanReq, request: Request) -> Dict[str, Any]:
         "message": f"Тариф «{plain_name}» подключён. Бонусами списано: {discount} ₽.",
         "state": st,
     }
+
+
+@app.post("/api/saas/checkout")
+async def api_saas_checkout(req: StripeCheckoutReq, request: Request) -> Dict[str, Any]:
+    """
+    Создаёт Stripe Checkout Session и возвращает ссылку на оплату.
+    Если Stripe не настроен — активирует тариф напрямую (демо-режим, для локальной разработки).
+    """
+    ensure_user(request, req.user_id)
+    if req.plan not in PLANS or req.plan == "trial":
+        raise HTTPException(status_code=400, detail="Неизвестный тариф")
+
+    plan = PLANS[req.plan]
+
+    if not stripe_pay.is_configured():
+        u, _ = saas_db.get_or_create_user(req.user_id)
+        discount = min(int(u.get("balance_rub") or 0), plan["price_rub"] // 2)
+        final_price = plan["price_rub"] - discount
+        if discount > 0:
+            saas_db.update_field(req.user_id, "balance_rub", int(u["balance_rub"]) - discount)
+        saas_db.activate_plan(req.user_id, req.plan, amount_rub=final_price)
+        st = await _state_payload(user_id=req.user_id, mode="saas")
+        return {
+            "ok": True,
+            "demo": True,
+            "message": f"Тариф «{plan['name']}» активирован (демо-режим: Stripe не настроен).",
+            "state": st,
+        }
+
+    base = str(request.base_url).rstrip("/")
+    success_url = (os.environ.get("STRIPE_SUCCESS_URL") or f"{base}/app?mode=saas&pay=success").strip()
+    cancel_url = (os.environ.get("STRIPE_CANCEL_URL") or f"{base}/app?mode=saas&pay=cancel").strip()
+
+    session, err = stripe_pay.create_checkout_session(
+        user_id=req.user_id,
+        plan_key=req.plan,
+        plan_name=plan["name"],
+        price_rub=plan["price_rub"],
+        success_url=success_url,
+        cancel_url=cancel_url,
+    )
+    if err:
+        raise HTTPException(status_code=400, detail=f"Не удалось создать оплату: {err}")
+    return {"ok": True, "url": session.url}
+
+
+@app.post("/api/saas/webhook")
+async def api_saas_webhook(request: Request) -> Dict[str, Any]:
+    """
+    Приём уведомлений Stripe об оплате (webhook). Подпись проверяется
+    по STRIPE_WEBHOOK_SECRET — чужие запросы отбрасываются.
+    """
+    payload = await request.body()
+    sig = request.headers.get("stripe-signature") or ""
+    event, err = stripe_pay.verify_webhook(payload, sig)
+    if err:
+        raise HTTPException(status_code=400, detail=err)
+
+    if event and event.get("type") == "checkout.session.completed":
+        session = event.get("data", {}).get("object", {}) or {}
+        meta = session.get("metadata") or {}
+        uid = int(meta.get("user_id") or 0)
+        plan_key = str(meta.get("plan") or "")
+        if uid and plan_key in PLANS and plan_key != "trial":
+            # Сумму в рублях берём из прайса — учёт выручки ведётся в рублях.
+            saas_db.activate_plan(uid, plan_key, amount_rub=PLANS[plan_key]["price_rub"])
+
+    return {"received": True}
 
 
 # ─────────────────────────────────────────────────────────────────────────────

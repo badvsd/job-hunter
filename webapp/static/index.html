@@ -2260,10 +2260,16 @@ a{color:var(--clay);text-decoration:none}
 
   // ── SaaS: покупки ──────────────────────────────────────────
   function buyPlan(key) {
-    api('/api/saas/buy', { user_id: S.user_id, action: key }).then(function (j) {
+    api('/api/saas/checkout', { user_id: S.user_id, mode: mode, plan: key }).then(function (j) {
+      if (j.url) {
+        // Уходим на защищённую страницу оплаты Stripe.
+        if (tg && tg.openLink) { tg.openLink(j.url); }
+        else { window.location.href = j.url; }
+        return;
+      }
       toast(j.message || 'Готово', j.ok ? 'ok' : 'err');
       if (j.state) { S = Object.assign(S, j.state); paintState(); }
-    }).catch(function () { toast('Не получилось подключить тариф', 'err'); });
+    }).catch(function (e) { toast((e && e.message) || 'Не получилось подключить тариф', 'err'); });
   }
 
   $('giftBtn').addEventListener('click', function () {
@@ -2421,6 +2427,12 @@ a{color:var(--clay);text-decoration:none}
 
   // ── Старт ──────────────────────────────────────────────────
   tgReady();
+  // Показываем результат оплаты, если пользователь вернулся со страницы Stripe.
+  (function () {
+    var pay = (new URLSearchParams(location.search)).get('pay');
+    if (pay === 'success') setTimeout(function () { toast('Оплата прошла — тариф активируется', 'ok'); }, 600);
+    else if (pay === 'cancel') setTimeout(function () { toast('Оплата отменена', 'err'); }, 600);
+  })();
   Array.prototype.forEach.call(document.querySelectorAll('textarea'), function (t) { t.spellcheck = false; });
   paintMode();
   var startTab = (location.hash || '').replace('#', '');
