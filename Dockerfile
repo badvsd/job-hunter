@@ -37,9 +37,9 @@ ENV PORT=8085 \
     APPLY_HEADLESS=1 \
     APPLY_BROWSER_CHANNEL=""
 
-# 5. Папка данных: сюда подключается постоянный диск (Volume) на Railway.
-VOLUME ["/data"]
-
+# 5. Папка данных (/data) — сюда Railway монтирует постоянный диск (Volume).
+#    ВАЖНО: инструкцию VOLUME в Dockerfile писать нельзя — Railway её отклоняет.
+#    Диск подключается в настройках сервиса Railway (Settings → Volumes → /data).
 EXPOSE 8085
 
 # Запускаем лаунчер: он поднимает и сайт (Mini App), и Telegram-бота вместе.
