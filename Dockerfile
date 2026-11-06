@@ -37,8 +37,8 @@ ENV PORT=8085 \
     APPLY_HEADLESS=1 \
     APPLY_BROWSER_CHANNEL=""
 
-# 5. Папка данных: сюда подключается постоянный диск (Volume) на Railway.
-VOLUME ["/data"]
+# 5. Папка данных: на Railway подключи Volume (Settings → Volumes) с Mount Path /data.
+#    Инструкция VOLUME в Dockerfile Railway не поддерживает.
 
 EXPOSE 8085
 
