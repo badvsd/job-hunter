@@ -163,7 +163,9 @@ class Vacancy:
     trust_flags: List[str] = field(default_factory=list)
 
 
-# Популярные публичные Telegram-каналы с вакансиями в РФ
+# Популярные публичные Telegram-каналы с вакансиями в РФ.
+# Это и примеры того, какие каналы стоит искать в Telegram и на других площадках:
+# профильные каналы по профессии дают самые свежие и релевантные вакансии.
 DEFAULT_TG_CHANNELS = [
     "finder_vc",        # Finder.vc: удалённая работа
     "normrabota",       # Норм работа
@@ -172,6 +174,11 @@ DEFAULT_TG_CHANNELS = [
     "foranalysts",      # Для аналитиков
     "zarubezhom_jobs",  # Удалёнка и релокация
     "work_in_digital",  # Digital вакансии
+    # ── примеры профильных каналов для юристов ──
+    "job_lawyer_junior",   # Вакансии младших юристов
+    "proocareer",          # PRO.Карьера: вакансии для юристов и юридического рынка
+    "aestheticsoflawjob",  # Вакансии для юристов (стажировки, госслужба)
+    "tohuntalawyer",       # To Hunt a Lawyer: вакансии и стажировки для студентов-юристов
 ]
 
 
