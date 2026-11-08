@@ -182,6 +182,95 @@ DEFAULT_TG_CHANNELS = [
 ]
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Словарь «профессия → каналы + ключевые слова».
+# Telegram игнорирует ?q= в t.me/s/<канал>, поэтому релевантность постов
+# считаем на своей стороне: подключаем профильные каналы под запрос
+# и фильтруем посты по ключевым словам.
+# ─────────────────────────────────────────────────────────────────────────────
+PROFESSION_CHANNEL_MAP: Dict[str, Dict[str, List[str]]] = {
+    "юрист": {
+        "aliases": ["юрист", "юрид", "правов", "адвокат", "lawyer", "legal", "нотариус", "юротдел"],
+        "channels": [
+            "job_lawyer_junior",
+            "proocareer",
+            "aestheticsoflawjob",
+            "tohuntalawyer",
+        ],
+        "keywords": [
+            "юрист", "юридич", "правов", "адвокат", "lawyer", "legal",
+            "нотариус", "право", "судебн", "договор", "стажер", "стажировк",
+        ],
+    },
+    "айти": {
+        "aliases": ["айти", "разработчик", "программист", "developer", "engineer", "devops", "backend", "frontend", "тестировщик", "qa"],
+        "channels": [
+            "vacancies_it",
+            "devjobs",
+            "finder_vc",
+            "work_in_digital",
+        ],
+        "keywords": [
+            "разработчик", "программист", "developer", "engineer", "python",
+            "java", "javascript", "backend", "frontend", "devops", "qa",
+            "тестировщик", "программир",
+        ],
+    },
+    "аналитик": {
+        "aliases": ["аналитик", "analyst", "data science", "data-science", "datascientist", "bi-аналитик", "data-аналитик"],
+        "channels": [
+            "foranalysts",
+        ],
+        "keywords": [
+            "аналитик", "analyst", "data", "sql", "power bi", "tableau", "метрик", "дашборд",
+        ],
+    },
+}
+
+
+def _split_query_tokens(query: str) -> List[str]:
+    """Делит запрос на нормализованные токены (>= 3 символа) для сопоставления."""
+    q = (query or "").lower()
+    return [t for t in re.split(r"[^a-zа-яё0-9]+", q) if len(t) >= 3]
+
+
+def profession_channels_for(query: str) -> List[str]:
+    """Подбирает профильные каналы под запрос по словарю профессий."""
+    q = (query or "").lower()
+    out: List[str] = []
+    for cfg in PROFESSION_CHANNEL_MAP.values():
+        if any(alias in q for alias in cfg["aliases"]):
+            for ch in cfg["channels"]:
+                if ch not in out:
+                    out.append(ch)
+    return out
+
+
+def relevance_keywords_for(query: str) -> List[str]:
+    """Собирает ключевые слова для клиентской фильтрации постов под запрос."""
+    q = (query or "").lower()
+    kws: List[str] = []
+    for cfg in PROFESSION_CHANNEL_MAP.values():
+        if any(alias in q for alias in cfg["aliases"]):
+            kws.extend(cfg["keywords"])
+    kws.extend(_split_query_tokens(query))
+    seen = set()
+    uniq: List[str] = []
+    for kw in kws:
+        if kw and kw not in seen:
+            seen.add(kw)
+            uniq.append(kw)
+    return uniq
+
+
+def post_matches_query(text: str, keywords: List[str]) -> bool:
+    """Проверяет, релевантен ли пост запросу по ключевым словам."""
+    if not keywords:
+        return True
+    t = (text or "").lower()
+    return any(kw in t for kw in keywords)
+
+
 def _clean_html(raw: str) -> str:
     if not raw:
         return ""
@@ -389,11 +478,24 @@ async def search_telegram_channels(
     limit: int = 5,
 ) -> List[Vacancy]:
     """
-    Реальный парсинг публичных Telegram-каналов с вакансиями через веб-превью t.me/s/<channel>?q=<query>.
-    Работает мгновенно, без авторизации сим-карты и риска бана TG-аккаунта!
+    Реальный парсинг публичных Telegram-каналов с вакансиями через веб-превью t.me/s/<channel>.
+
+    Два улучшения против «слепого» парсинга (Telegram игнорирует ?q=):
+    1. Профильные каналы под запрос подключаются автоматически (словарь профессий).
+    2. Посты фильтруются на нашей стороне по ключевым словам.
+       Если ничего не отфильтровалось — отдаём последние посты из каналов (фолбэк),
+       чтобы пользователь не получал пустой ответ.
     """
-    ch_list = channels or DEFAULT_TG_CHANNELS
-    out: List[Vacancy] = []
+    prof_channels = profession_channels_for(query)
+    explicit = [c.strip().lstrip("@") for c in (channels or []) if c and c.strip()]
+    ch_list: List[str] = []
+    for ch in prof_channels + explicit + DEFAULT_TG_CHANNELS:
+        if ch and ch not in ch_list:
+            ch_list.append(ch)
+
+    keywords = relevance_keywords_for(query)
+    matched: List[Vacancy] = []
+    fallback: List[Vacancy] = []
     headers = {
         "User-Agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -402,8 +504,8 @@ async def search_telegram_channels(
     }
     async with httpx.AsyncClient(timeout=10.0, headers=headers, follow_redirects=True) as client:
         tasks = []
-        for ch in ch_list[:5]:
-            search_url = f"https://t.me/s/{ch}?q={quote_plus(query)}"
+        for ch in ch_list[:15]:
+            search_url = f"https://t.me/s/{ch}"
             tasks.append((ch, client.get(search_url)))
 
         results = await asyncio.gather(*[t[1] for t in tasks], return_exceptions=True)
@@ -449,10 +551,12 @@ async def search_telegram_channels(
                     contact=contact,
                 )
                 QuickScamFilter.score_vacancy(v, employer_verified=False)
-                out.append(v)
-                if len(out) >= limit:
-                    return out
-    return out
+                if post_matches_query(raw_text, keywords):
+                    matched.append(v)
+                else:
+                    fallback.append(v)
+
+    return matched[:limit] if matched else fallback[:limit]
 
 
 def generate_crossplatform_search_hubs(query: str, city: str = "") -> List[Vacancy]:
