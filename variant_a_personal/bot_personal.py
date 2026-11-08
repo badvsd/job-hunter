@@ -885,8 +885,27 @@ async def cb_settings(call: CallbackQuery, state: FSMContext) -> None:
         await state.set_state(Form.waiting_tg_channels)
         await call.message.answer(
             f"📡 <b>Текущие Telegram-каналы для парсинга:</b>\n<code>{prof['tg_channels']}</code>\n\n"
-            "Отправьте новый список публичных каналов через запятую (без @):"
+            "Отправьте новый список публичных каналов через запятую (без @),\n"
+            "или верните стандартный список одной кнопкой:",
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [InlineKeyboardButton(text="🔄 Сбросить к стандартному списку", callback_data="set:channels_reset")],
+                    [InlineKeyboardButton(text="✖️ Отмена", callback_data="set:channels_cancel")],
+                ]
+            ),
         )
+    elif what == "channels_reset":
+        await state.clear()
+        db.update_field(uid, "tg_channels", ",".join(DEFAULT_TG_CHANNELS))
+        prof = db.get_profile(uid)
+        await call.message.answer(
+            f"✅ Каналы сброшены к стандартному списку (включая вакансии юристов):\n"
+            f"<code>{prof['tg_channels']}</code>",
+            reply_markup=settings_kb(prof),
+        )
+    elif what == "channels_cancel":
+        await state.clear()
+        await call.message.answer("Отменено — каналы не изменились.", reply_markup=settings_kb(prof))
     elif what == "autopilot":
         new_val = 0 if prof.get("autopilot") else 1
         db.update_field(uid, "autopilot", new_val)
