@@ -23,3 +23,6 @@ worker/.browser-profile/
 # Виртуальное окружение
 .venv/
 venv/
+
+# Node (Railway IaC SDK, нужен только для railway config)
+node_modules/

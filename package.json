@@ -1,0 +1,9 @@
+{
+  "name": "job-hunter-bots",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Railway IaC (railway/iac) — только для управления инфраструктурой, приложение на Python/Docker.",
+  "devDependencies": {
+    "railway": "^3.16.0"
+  }
+}
