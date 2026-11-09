@@ -22,15 +22,19 @@ from __future__ import annotations
 import asyncio
 import html
 import json
+import logging
 import os
 import re
 import time
 from dataclasses import dataclass, field
+from itertools import zip_longest
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import quote_plus, urlparse
 
 import httpx
 from bs4 import BeautifulSoup
+
+log = logging.getLogger("jobhunter.search")
 
 try:
     import pymupdf as fitz  # PyMuPDF для чтения PDF-резюме
@@ -296,167 +300,307 @@ def _format_hh_salary(sal: Optional[dict]) -> str:
     return "з/п не указана"
 
 
-async def _search_hh_html(query: str, city: str = "", limit: int = 6) -> List[Vacancy]:
-    """
-    Резервный парсер публичной HTML-выдачи hh.ru.
-    Используется, когда официальное API отвечает 403 (без OAuth/с чужого IP):
-    читаем только открытые карточки вакансий, без авторизации и капчи.
-    """
-    out: List[Vacancy] = []
-    text_q = f"{query} {city}".strip()
-    headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-            "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-        ),
-        "Accept-Language": "ru-RU,ru;q=0.9",
-    }
+# ─────────────────────────────────────────────────────────────────────────────
+# НАСТРОЙКИ ГЛУБИНЫ ПОИСКА (можно менять переменными окружения)
+# ─────────────────────────────────────────────────────────────────────────────
+def _env_int(name: str, default: int) -> int:
     try:
-        async with httpx.AsyncClient(timeout=20.0, headers=headers, follow_redirects=True) as client:
-            r = await client.get(
-                "https://hh.ru/search/vacancy",
-                params={"text": text_q, "items_on_page": min(max(limit, 20), 50), "hhtmFrom": "vacancy_search_list"},
-            )
-            if r.status_code != 200:
-                return out
-            soup = BeautifulSoup(r.text, "html.parser")
-            cards = soup.find_all("div", class_=re.compile(r"vacancy-card--"))
-            for card in cards[:limit]:
-                link = card.select_one('[data-qa="serp-item__title"]')
-                title_el = card.select_one('[data-qa="serp-item__title-text"]') or link
-                if not title_el:
-                    continue
-                title = title_el.get_text(" ", strip=True)
-                url = (link.get("href") if link else "") or ""
-                url = url.split("?")[0]
-                emp = card.select_one('[data-qa="vacancy-serp__vacancy-employer-text"]') or card.select_one(
-                    '[data-qa="vacancy-serp__vacancy-employer"]'
-                )
-                company = emp.get_text(" ", strip=True) if emp else "Прямой работодатель"
-                city_el = card.select_one('[data-qa="vacancy-serp__vacancy-address"]')
-                vac_city = city_el.get_text(" ", strip=True) if city_el else city
-                trusted_emp = bool(card.select_one('[data-qa="trusted-employer-link"]'))
-
-                experience = ""
-                exp_el = card.select_one('[data-qa^="vacancy-serp__vacancy-work-experience"]')
-                if exp_el:
-                    experience = exp_el.get_text(" ", strip=True)
-                remote = "Можно удалённо" in card.get_text(" ", strip=True)
-
-                desc_parts = []
-                if experience:
-                    desc_parts.append(experience)
-                if remote:
-                    desc_parts.append("можно удалённо")
-                desc_parts.append("Полные условия и отклик — в карточке на hh.ru")
-                description = " · ".join(desc_parts)
-
-                vac_id = card.get("id") or url.rstrip("/").split("/")[-1] or title
-                v = Vacancy(
-                    id=f"hh_{vac_id}",
-                    platform="HH.ru",
-                    title=title,
-                    company=company,
-                    salary="",
-                    url=url or f"https://hh.ru/vacancy/{vac_id}",
-                    description=description[:600],
-                    city=vac_city,
-                )
-                QuickScamFilter.score_vacancy(v, employer_verified=trusted_emp)
-                out.append(v)
-    except Exception:
-        pass
-    return out
+        return int(os.getenv(name, "") or default)
+    except ValueError:
+        return default
 
 
-async def search_hh(query: str, city: str = "", min_salary: int = 0, limit: int = 6) -> List[Vacancy]:
-    """Поиск по официальному публичному API HH.ru (без бана и капчи)."""
+SEARCH_MAX_TOTAL = _env_int("SEARCH_MAX_TOTAL", 1000)       # всего вакансий за один поиск
+HH_PAGE_SIZE = 50                                            # карточек на странице HTML-выдачи hh
+HH_MAX_PAGES = 40                                            # hh отдаёт максимум ~2000 вакансий на запрос
+HH_CONCURRENCY = _env_int("HH_CONCURRENCY", 3)               # параллельных страниц hh (больше — риск капчи)
+TG_PAGES_PER_CHANNEL = _env_int("TG_PAGES_PER_CHANNEL", 5)   # глубина канала (~20 постов на страницу)
+TG_CONCURRENCY = _env_int("TG_CONCURRENCY", 6)               # параллельных запросов к t.me
+
+# Статистика последнего поиска по источникам (для логов и диагностики в боте).
+LAST_SEARCH_STATS: Dict[str, Any] = {}
+_HH_API_BLOCKED_UNTIL = 0.0   # если API отдал не 200 — 10 минут сразу идём в HTML
+
+_HH_HTML_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "Accept-Language": "ru-RU,ru;q=0.9",
+}
+
+_HH_AREAS = {
+    "москва": 1, "санкт-петербург": 2, "спб": 2, "питер": 2, "екатеринбург": 3,
+    "новосибирск": 4, "нижний новгород": 66, "казань": 88, "россия": 113, "вся россия": 113,
+}
+_REMOTE_WORDS = ("удален", "удалён", "remote", "дистанц")
+
+
+_HH_SALARY_RE = re.compile(
+    r"(?:(?:от|до)\s+)?\d[\d\s\u00a0\u202f]*(?:[–—-]\s*\d[\d\s\u00a0\u202f]*)?\s*[₽$€]\s*(?:за\s+\w+|на руки)?"
+)
+
+
+def _hh_location(city: str) -> Tuple[Dict[str, Any], str]:
+    """(доп. параметры hh, суффикс к тексту запроса). Город лучше передавать как area, а не словом в тексте."""
+    c = (city or "").strip().lower()
+    if not c:
+        return {}, ""
+    if any(w in c for w in _REMOTE_WORDS):
+        return {"schedule": "remote"}, ""
+    if c in _HH_AREAS:
+        return {"area": _HH_AREAS[c]}, ""
+    return {}, city.strip()
+
+
+def _parse_hh_cards(page_html: str, fallback_city: str) -> Tuple[int, List[Vacancy]]:
+    """Разбирает HTML-выдачу hh. Возвращает (число карточек на странице, вакансии).
+    Рекламные карточки (ссылка на adsrv.hh.ru/click) отбрасываются."""
+    soup = BeautifulSoup(page_html, "html.parser")
+    cards = soup.find_all("div", class_=re.compile(r"vacancy-card--"))
+    out: List[Vacancy] = []
+    for card in cards:
+        link = card.select_one('[data-qa="serp-item__title"]')
+        title_el = card.select_one('[data-qa="serp-item__title-text"]') or link
+        if not link or not title_el:
+            continue
+        m = re.search(r"hh\.ru/vacancy/(\d+)|^/vacancy/(\d+)", (link.get("href") or ""))
+        if not m:
+            continue  # реклама / не вакансия
+        vac_id = m.group(1) or m.group(2)
+        title = title_el.get_text(" ", strip=True)
+        emp = card.select_one('[data-qa="vacancy-serp__vacancy-employer-text"]') or card.select_one(
+            '[data-qa="vacancy-serp__vacancy-employer"]'
+        )
+        company = emp.get_text(" ", strip=True) if emp else "Прямой работодатель"
+        city_el = card.select_one('[data-qa="vacancy-serp__vacancy-address"]')
+        vac_city = city_el.get_text(" ", strip=True) if city_el else fallback_city
+        trusted_emp = bool(card.select_one('[data-qa="trusted-employer-link"]'))
+        # У блока зарплаты в вёрстке hh нет data-qa — берём сумму регуляркой по тексту карточки.
+        sal_m = _HH_SALARY_RE.search(card.get_text(" ", strip=True))
+        salary = re.sub(r"\s+", " ", sal_m.group(0)).strip() if sal_m else "з/п не указана"
+
+        exp_el = card.select_one('[data-qa^="vacancy-serp__vacancy-work-experience"]')
+        desc_parts = []
+        if exp_el:
+            desc_parts.append(exp_el.get_text(" ", strip=True))
+        if "Можно удалённо" in card.get_text(" ", strip=True):
+            desc_parts.append("можно удалённо")
+        desc_parts.append("Полные условия и отклик — в карточке на hh.ru")
+
+        v = Vacancy(
+            id=f"hh_{vac_id}",
+            platform="HH.ru",
+            title=title,
+            company=company,
+            salary=salary,
+            url=f"https://hh.ru/vacancy/{vac_id}",
+            description=" · ".join(desc_parts)[:600],
+            city=vac_city,
+        )
+        QuickScamFilter.score_vacancy(v, employer_verified=trusted_emp)
+        out.append(v)
+    return len(cards), out
+
+
+async def _search_hh_html(query: str, city: str = "", limit: int = 50, min_salary: int = 0) -> List[Vacancy]:
+    """
+    Резервный парсер публичной HTML-выдачи hh.ru (когда API отдаёт 403 без OAuth).
+    Листает страницы по 50 карточек (до 40 страниц ≈ 2000 вакансий — предел hh).
+    """
+    extra, suffix = _hh_location(city)
+    base: Dict[str, Any] = {
+        "text": f"{query} {suffix}".strip(),
+        "items_on_page": HH_PAGE_SIZE,
+        "hhtmFrom": "vacancy_search_list",
+        **extra,
+    }
+    if min_salary and min_salary > 0:
+        base["salary"] = min_salary
+
+    need_pages = min(HH_MAX_PAGES, -(-limit // HH_PAGE_SIZE) + 1)  # +1 запас на рекламу и дубли
+    out: List[Vacancy] = []
+    seen: set = set()
+    status_note = "ok"
+    sem = asyncio.Semaphore(max(1, HH_CONCURRENCY))
+    try:
+        async with httpx.AsyncClient(timeout=20.0, headers=_HH_HTML_HEADERS, follow_redirects=True) as client:
+
+            async def fetch(page: int):
+                async with sem:
+                    return page, await client.get(
+                        "https://hh.ru/search/vacancy", params={**base, "page": page}
+                    )
+
+            page = 0
+            while page < need_pages and len(out) < limit:
+                batch = range(page, min(page + HH_CONCURRENCY, need_pages))
+                results = await asyncio.gather(*[fetch(p) for p in batch], return_exceptions=True)
+                stop = False
+                for res in results:
+                    if isinstance(res, Exception):
+                        status_note = f"error:{type(res).__name__}"
+                        log.warning("hh html: запрос упал: %r", res)
+                        stop = True
+                        continue
+                    p, r = res
+                    if r.status_code != 200:
+                        status_note = f"http {r.status_code}"
+                        log.warning("hh html: страница %s -> HTTP %s (капча/блок IP?)", p, r.status_code)
+                        stop = True
+                        continue
+                    n_cards, vacs = _parse_hh_cards(r.text, city)
+                    if n_cards == 0:
+                        if p == 0:
+                            status_note = "0 карточек на 1-й странице (капча или смена вёрстки?)"
+                            log.warning("hh html: %s", status_note)
+                        stop = True
+                        continue
+                    for v in vacs:
+                        if v.url not in seen:
+                            seen.add(v.url)
+                            out.append(v)
+                    if n_cards < HH_PAGE_SIZE:  # последняя страница
+                        stop = True
+                if stop:
+                    break
+                page += HH_CONCURRENCY
+    except Exception as e:  # noqa: BLE001
+        status_note = f"error:{type(e).__name__}"
+        log.exception("hh html: сбой поиска")
+    LAST_SEARCH_STATS["hh_html"] = {"count": len(out), "status": status_note}
+    log.info("hh html: query=%r city=%r -> %d (%s)", query, city, len(out), status_note)
+    return out[:limit]
+
+
+async def search_hh(query: str, city: str = "", min_salary: int = 0, limit: int = 50) -> List[Vacancy]:
+    """Поиск hh.ru: сначала публичный API (до 100 на страницу), при отказе — HTML-выдача."""
+    global _HH_API_BLOCKED_UNTIL
+    if time.time() < _HH_API_BLOCKED_UNTIL:
+        return await _search_hh_html(query, city=city, limit=limit, min_salary=min_salary)
+
+    extra, suffix = _hh_location(city)
+    per_page = max(1, min(100, limit))
     params: Dict[str, Any] = {
-        "text": f"{query} {city}".strip(),
-        "per_page": min(limit, 20),
+        "text": f"{query} {suffix}".strip(),
+        "per_page": per_page,
         "page": 0,
         "order_by": "publication_time",
+        **extra,
     }
     if min_salary and min_salary > 0:
         params["salary"] = min_salary
 
     headers = {"User-Agent": "JobShieldBot/2.0 (contact@jobshield.local)"}
     out: List[Vacancy] = []
+    seen: set = set()
     try:
-        async with httpx.AsyncClient(timeout=12.0, headers=headers) as client:
-            r = await client.get("https://api.hh.ru/vacancies", params=params)
-            if r.status_code != 200:
-                # API часто отдаёт 403 без OAuth — читаем публичную HTML-выдачу.
-                return await _search_hh_html(query, city=city, limit=limit)
-            items = r.json().get("items", [])
-            for it in items[:limit]:
-                emp = it.get("employer") or {}
-                snippet = it.get("snippet") or {}
-                req = _clean_html(snippet.get("requirement") or "")
-                resp = _clean_html(snippet.get("responsibility") or "")
-                desc = " | ".join([x for x in (req, resp) if x]) or "Подробности по ссылке на вакансию."
-                trusted_emp = bool(emp.get("trusted"))
-                v = Vacancy(
-                    id=f"hh_{it.get('id')}",
-                    platform="HH.ru",
-                    title=it.get("name", "Вакансия"),
-                    company=emp.get("name", "Прямой работодатель"),
-                    salary=_format_hh_salary(it.get("salary")),
-                    url=it.get("alternate_url", f"https://hh.ru/vacancy/{it.get('id')}"),
-                    description=desc[:600],
-                    city=(it.get("area") or {}).get("name", ""),
-                    published_at=(it.get("published_at") or "")[:10],
-                )
-                QuickScamFilter.score_vacancy(v, employer_verified=trusted_emp)
-                out.append(v)
-    except Exception:
-        return await _search_hh_html(query, city=city, limit=limit)
-    return out
+        async with httpx.AsyncClient(timeout=15.0, headers=headers) as client:
+            page = 0
+            total_pages = 1
+            while page < total_pages and page < 20 and len(out) < limit:  # API: глубина не больше 2000
+                r = await client.get("https://api.hh.ru/vacancies", params={**params, "page": page})
+                if r.status_code != 200:
+                    log.warning("hh api: HTTP %s на странице %s -> HTML-фолбэк", r.status_code, page)
+                    if page == 0:
+                        _HH_API_BLOCKED_UNTIL = time.time() + 600
+                        return await _search_hh_html(query, city=city, limit=limit, min_salary=min_salary)
+                    break
+                data = r.json()
+                total_pages = int(data.get("pages") or 1)
+                items = data.get("items", [])
+                if not items:
+                    break
+                for it in items:
+                    emp = it.get("employer") or {}
+                    snippet = it.get("snippet") or {}
+                    req = _clean_html(snippet.get("requirement") or "")
+                    resp = _clean_html(snippet.get("responsibility") or "")
+                    desc = " | ".join([x for x in (req, resp) if x]) or "Подробности по ссылке на вакансию."
+                    v = Vacancy(
+                        id=f"hh_{it.get('id')}",
+                        platform="HH.ru",
+                        title=it.get("name", "Вакансия"),
+                        company=emp.get("name", "Прямой работодатель"),
+                        salary=_format_hh_salary(it.get("salary")),
+                        url=it.get("alternate_url", f"https://hh.ru/vacancy/{it.get('id')}"),
+                        description=desc[:600],
+                        city=(it.get("area") or {}).get("name", ""),
+                        published_at=(it.get("published_at") or "")[:10],
+                    )
+                    if v.url in seen:
+                        continue
+                    seen.add(v.url)
+                    QuickScamFilter.score_vacancy(v, employer_verified=bool(emp.get("trusted")))
+                    out.append(v)
+                page += 1
+    except Exception:  # noqa: BLE001
+        log.exception("hh api: сбой -> HTML-фолбэк")
+        return await _search_hh_html(query, city=city, limit=limit, min_salary=min_salary)
+    LAST_SEARCH_STATS["hh_api"] = {"count": len(out), "status": "ok"}
+    log.info("hh api: query=%r city=%r -> %d", query, city, len(out))
+    return out[:limit]
 
 
-async def search_trudvsem(query: str, limit: int = 5) -> List[Vacancy]:
+async def search_trudvsem(query: str, limit: int = 100) -> List[Vacancy]:
     """
-    Поиск по Государственному порталу «Работа России» (opendata.trudvsem.ru).
-    Огромный плюс: отдает реальный ИНН и ОГРН каждого работодателя!
+    Поиск по порталу «Работа России» (opendata.trudvsem.ru) с пагинацией.
+    Отдаёт реальный ИНН и ОГРН работодателя.
     """
     url = "https://opendata.trudvsem.ru/api/v1/vacancies"
-    params = {"text": query, "limit": min(limit, 15)}
+    page_size = max(1, min(100, limit))
     out: List[Vacancy] = []
+    seen: set = set()
+    status_note = "ok"
     try:
-        async with httpx.AsyncClient(timeout=12.0, verify=False) as client:
-            r = await client.get(url, params=params)
-            if r.status_code != 200:
-                return out
-            data = r.json()
-            vacancies = (
-                data.get("results", {})
-                .get("vacancies", [])
-            )
-            for item in vacancies[:limit]:
-                vac = item.get("vacancy") or {}
-                comp = vac.get("company") or {}
-                sal = vac.get("salary") or (
-                    f"от {vac.get('salary_min')} ₽" if vac.get("salary_min") else "з/п по договорённости"
-                )
-                duty = _clean_html(vac.get("duty") or "")
-                inn = str(comp.get("inn") or "")
-                v = Vacancy(
-                    id=f"tv_{vac.get('id', '')[:12]}",
-                    platform="Работа России (Госреестр)",
-                    title=vac.get("job-name", "Специалист"),
-                    company=comp.get("name", "Организация"),
-                    salary=str(sal),
-                    url=vac.get("vac_url", "https://trudvsem.ru"),
-                    description=duty[:600] or "Официальное трудоустройство по ТК РФ.",
-                    city=(vac.get("region") or {}).get("name", ""),
-                    inn=inn,
-                    contact=comp.get("email") or comp.get("phone") or "",
-                )
-                QuickScamFilter.score_vacancy(v, employer_verified=bool(inn))
-                out.append(v)
-    except Exception:
-        pass
-    return out
+        async with httpx.AsyncClient(timeout=15.0, verify=False) as client:
+            for page in range(min(10, -(-limit // page_size) + 1)):
+                r = await client.get(url, params={"text": query, "limit": page_size, "offset": page})
+                if r.status_code != 200:
+                    status_note = f"http {r.status_code}"
+                    log.warning("trudvsem: HTTP %s на странице %s", r.status_code, page)
+                    break
+                vacancies = (r.json().get("results", {}) or {}).get("vacancies", []) or []
+                if not vacancies:
+                    break
+                new_here = 0
+                for item in vacancies:
+                    vac = item.get("vacancy") or {}
+                    vid = str(vac.get("id", ""))
+                    if not vid or vid in seen:
+                        continue
+                    seen.add(vid)
+                    new_here += 1
+                    comp = vac.get("company") or {}
+                    sal = vac.get("salary") or (
+                        f"от {vac.get('salary_min')} ₽" if vac.get("salary_min") else "з/п по договорённости"
+                    )
+                    duty = _clean_html(vac.get("duty") or "")
+                    inn = str(comp.get("inn") or "")
+                    v = Vacancy(
+                        id=f"tv_{vid[:12]}",
+                        platform="Работа России (Госреестр)",
+                        title=vac.get("job-name", "Специалист"),
+                        company=comp.get("name", "Организация"),
+                        salary=str(sal),
+                        url=vac.get("vac_url", "https://trudvsem.ru"),
+                        description=duty[:600] or "Официальное трудоустройство по ТК РФ.",
+                        city=(vac.get("region") or {}).get("name", ""),
+                        inn=inn,
+                        contact=comp.get("email") or comp.get("phone") or "",
+                    )
+                    QuickScamFilter.score_vacancy(v, employer_verified=bool(inn))
+                    out.append(v)
+                    if len(out) >= limit:
+                        break
+                if len(out) >= limit or new_here == 0 or len(vacancies) < page_size:
+                    break
+    except Exception as e:  # noqa: BLE001
+        status_note = f"error:{type(e).__name__}"
+        log.exception("trudvsem: сбой поиска")
+    LAST_SEARCH_STATS["trudvsem"] = {"count": len(out), "status": status_note}
+    log.info("trudvsem: query=%r -> %d (%s)", query, len(out), status_note)
+    return out[:limit]
 
 
 def _extract_tg_contact(text: str, channel_name: str) -> str:
@@ -472,19 +616,65 @@ def _extract_tg_contact(text: str, channel_name: str) -> str:
     return ""
 
 
+async def _tg_channel_posts(client: httpx.AsyncClient, sem: asyncio.Semaphore, ch: str, pages: int):
+    """Посты канала с веб-превью t.me/s/<channel>, листая назад через ?before=<id>.
+    Возвращает (список постов, статус)."""
+    posts: List[Dict[str, str]] = []
+    before: Optional[int] = None
+    status = "ok"
+    for _ in range(max(1, pages)):
+        url = f"https://t.me/s/{ch}" + (f"?before={before}" if before else "")
+        try:
+            async with sem:
+                res = await client.get(url)
+        except Exception as e:  # noqa: BLE001
+            status = f"error:{type(e).__name__}"
+            log.warning("tg @%s: запрос упал: %r", ch, e)
+            break
+        if res.status_code != 200:
+            status = f"http {res.status_code}"
+            log.warning("tg @%s: HTTP %s", ch, res.status_code)
+            break
+        soup = BeautifulSoup(res.text, "html.parser")
+        wraps = soup.select(".tgme_widget_message_wrap")
+        if not wraps:
+            if not posts:
+                status = "0 постов (канал закрыт/не существует?)"
+            break
+        ids: List[int] = []
+        for w in reversed(wraps):  # новые сверху
+            msg = w.select_one(".tgme_widget_message[data-post]")
+            if msg:
+                try:
+                    ids.append(int(str(msg["data-post"]).rsplit("/", 1)[-1]))
+                except ValueError:
+                    pass
+            text_el = w.select_one(".tgme_widget_message_text")
+            if not text_el:
+                continue
+            raw_text = text_el.get_text("\n", strip=True)
+            if len(raw_text) < 40:
+                continue
+            link_el = w.select_one(".tgme_widget_message_date")
+            post_url = link_el["href"] if link_el and link_el.has_attr("href") else f"https://t.me/s/{ch}"
+            posts.append({"ch": ch, "text": raw_text, "url": post_url})
+        if not ids or min(ids) <= 1:
+            break
+        before = min(ids)
+    return posts, status
+
+
 async def search_telegram_channels(
     query: str,
     channels: Optional[List[str]] = None,
-    limit: int = 5,
+    limit: int = 100,
 ) -> List[Vacancy]:
     """
-    Реальный парсинг публичных Telegram-каналов с вакансиями через веб-превью t.me/s/<channel>.
-
-    Два улучшения против «слепого» парсинга (Telegram игнорирует ?q=):
-    1. Профильные каналы под запрос подключаются автоматически (словарь профессий).
-    2. Посты фильтруются на нашей стороне по ключевым словам.
-       Если ничего не отфильтровалось — отдаём последние посты из каналов (фолбэк),
-       чтобы пользователь не получал пустой ответ.
+    Парсинг публичных Telegram-каналов (веб-превью t.me/s/<channel>).
+    Опрашиваются ВСЕ каналы: профильные под запрос + заданные пользователем + стандартные,
+    у каждого — до TG_PAGES_PER_CHANNEL страниц (~20 постов на страницу).
+    Telegram игнорирует ?q=, поэтому релевантность считаем у себя по ключевым словам;
+    если ничего не подошло — отдаём последние посты (фолбэк), чтобы ответ не был пустым.
     """
     prof_channels = profession_channels_for(query)
     explicit = [c.strip().lstrip("@") for c in (channels or []) if c and c.strip()]
@@ -494,69 +684,66 @@ async def search_telegram_channels(
             ch_list.append(ch)
 
     keywords = relevance_keywords_for(query)
-    matched: List[Vacancy] = []
-    fallback: List[Vacancy] = []
     headers = {
         "User-Agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
             "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
         )
     }
-    async with httpx.AsyncClient(timeout=10.0, headers=headers, follow_redirects=True) as client:
-        tasks = []
-        for ch in ch_list[:15]:
-            search_url = f"https://t.me/s/{ch}"
-            tasks.append((ch, client.get(search_url)))
-
-        results = await asyncio.gather(*[t[1] for t in tasks], return_exceptions=True)
-
-        for idx, res in enumerate(results):
-            ch = tasks[idx][0]
-            if isinstance(res, Exception) or res.status_code != 200:
+    sem = asyncio.Semaphore(max(1, TG_CONCURRENCY))
+    matched: List[Vacancy] = []
+    fallback: List[Vacancy] = []
+    seen: set = set()
+    per_channel: Dict[str, str] = {}
+    async with httpx.AsyncClient(timeout=12.0, headers=headers, follow_redirects=True) as client:
+        results = await asyncio.gather(
+            *[_tg_channel_posts(client, sem, ch, TG_PAGES_PER_CHANNEL) for ch in ch_list],
+            return_exceptions=True,
+        )
+    for ch, res in zip(ch_list, results):
+        if isinstance(res, Exception):
+            per_channel[ch] = f"error:{type(res).__name__}"
+            log.warning("tg @%s: %r", ch, res)
+            continue
+        posts, status = res
+        per_channel[ch] = f"{len(posts)} постов, {status}"
+        for p in posts:
+            raw_text, post_url = p["text"], p["url"]
+            post_id = post_url.rstrip("/").split("/")[-1]
+            vid = f"tg_{ch}_{post_id}"
+            if vid in seen:
                 continue
-            soup = BeautifulSoup(res.text, "html.parser")
-            wraps = soup.select(".tgme_widget_message_wrap")
-            for w in reversed(wraps):
-                text_el = w.select_one(".tgme_widget_message_text")
-                if not text_el:
-                    continue
-                raw_text = text_el.get_text("\n", strip=True)
-                if len(raw_text) < 40:
-                    continue
-                lines = [ln.strip() for ln in raw_text.split("\n") if ln.strip()]
-                title = f"Вакансия из @{ch}"
-                for ln in lines[:4]:
-                    if len(re.sub(r"[^0-9A-Za-zА-Яа-яЁё]", "", ln)) >= 8:
-                        title = ln[:90]
-                        break
-                link_el = w.select_one(".tgme_widget_message_date")
-                post_url = link_el["href"] if link_el and link_el.has_attr("href") else f"https://t.me/s/{ch}"
-                post_id = post_url.rstrip("/").split("/")[-1]
-                sal_match = re.search(
-                    r"(\d[\d\s\.,]{2,12}\s*(?:₽|руб|р\.|тыс|\$|€|USD|EUR))",
-                    raw_text,
-                    re.IGNORECASE,
-                )
-                salary = sal_match.group(1).strip() if sal_match else "см. в посте"
-                contact = _extract_tg_contact(raw_text, ch)
+            seen.add(vid)
+            lines = [ln.strip() for ln in raw_text.split("\n") if ln.strip()]
+            title = f"Вакансия из @{ch}"
+            for ln in lines[:4]:
+                if len(re.sub(r"[^0-9A-Za-zА-Яа-яЁё]", "", ln)) >= 8:
+                    title = ln[:90]
+                    break
+            sal_match = re.search(
+                r"(\d[\d\s\.,]{2,12}\s*(?:₽|руб|р\.|тыс|\$|€|USD|EUR))", raw_text, re.IGNORECASE
+            )
+            salary = sal_match.group(1).strip() if sal_match else "см. в посте"
+            contact = _extract_tg_contact(raw_text, ch)
+            v = Vacancy(
+                id=vid,
+                platform=f"Telegram (@{ch})",
+                title=title,
+                company=f"Контакт: {contact}" if contact else f"Канал @{ch}",
+                salary=salary,
+                url=post_url,
+                description=raw_text[:650],
+                contact=contact,
+            )
+            QuickScamFilter.score_vacancy(v, employer_verified=False)
+            (matched if post_matches_query(raw_text, keywords) else fallback).append(v)
 
-                v = Vacancy(
-                    id=f"tg_{ch}_{post_id}",
-                    platform=f"Telegram (@{ch})",
-                    title=title,
-                    company=f"Контакт: {contact}" if contact else f"Канал @{ch}",
-                    salary=salary,
-                    url=post_url,
-                    description=raw_text[:650],
-                    contact=contact,
-                )
-                QuickScamFilter.score_vacancy(v, employer_verified=False)
-                if post_matches_query(raw_text, keywords):
-                    matched.append(v)
-                else:
-                    fallback.append(v)
-
-    return matched[:limit] if matched else fallback[:limit]
+    chosen = matched if matched else fallback
+    LAST_SEARCH_STATS["telegram"] = {
+        "channels": len(ch_list), "matched": len(matched), "fallback": len(fallback), "per_channel": per_channel,
+    }
+    log.info("telegram: query=%r каналов=%d подошло=%d (фолбэк=%d)", query, len(ch_list), len(matched), len(fallback))
+    return chosen[:limit]
 
 
 def generate_crossplatform_search_hubs(query: str, city: str = "") -> List[Vacancy]:
@@ -670,23 +857,47 @@ async def search_all_platforms(
     city: str = "",
     min_salary: int = 0,
     tg_channels: Optional[List[str]] = None,
+    max_total: Optional[int] = None,
 ) -> List[Vacancy]:
-    """Параллельный мульти-поиск сразу по всем площадкам Рунета."""
-    hh_task = search_hh(query, city=city, min_salary=min_salary, limit=5)
-    tv_task = search_trudvsem(f"{query} {city}".strip(), limit=3)
-    tg_task = search_telegram_channels(query, channels=tg_channels, limit=4)
+    """Параллельный мульти-поиск по всем площадкам Рунета (до max_total вакансий, по умолчанию 1000)."""
+    total = max(1, max_total or SEARCH_MAX_TOTAL)
+    t0 = time.time()
+    names = ["hh", "trudvsem", "telegram"]
+    results = await asyncio.gather(
+        search_hh(query, city=city, min_salary=min_salary, limit=total),
+        search_trudvsem(f"{query} {city}".strip(), limit=total),
+        search_telegram_channels(query, channels=tg_channels, limit=total),
+        return_exceptions=True,
+    )
+    groups: List[List[Vacancy]] = []
+    counts: Dict[str, Any] = {}
+    for name, res in zip(names, results):
+        if isinstance(res, Exception):
+            log.error("источник %s упал: %r", name, res)
+            counts[name] = f"error:{type(res).__name__}"
+            groups.append([])
+        else:
+            counts[name] = len(res)
+            groups.append(res)
 
-    hh_res, tv_res, tg_res = await asyncio.gather(hh_task, tv_task, tg_task, return_exceptions=True)
-
+    # Дедупликация + равномерное чередование источников, чтобы большой hh не вытеснил остальных.
     combined: List[Vacancy] = []
-    if isinstance(hh_res, list):
-        combined.extend(hh_res)
-    if isinstance(tv_res, list):
-        combined.extend(tv_res)
-    if isinstance(tg_res, list):
-        combined.extend(tg_res)
+    seen: set = set()
+    for row in zip_longest(*groups):
+        for v in row:
+            if v is None:
+                continue
+            key = v.url or v.id
+            if key in seen:
+                continue
+            seen.add(key)
+            combined.append(v)
+    combined = combined[:total]
 
-    # Добавляем кроссплатформенные шлюзы (Авито, ВК, ОК, Habr, SuperJob, LinkedIn, Instagram)
+    LAST_SEARCH_STATS["summary"] = {"query": query, "city": city, "by_source": counts, "total": len(combined)}
+    log.info("поиск %r (%s): %s -> итого %d за %.1f c", query, city, counts, len(combined), time.time() - t0)
+
+    # Кроссплатформенные шлюзы (Авито, ВК, ОК, Habr, SuperJob, LinkedIn, Instagram) — это ссылки, не вакансии.
     combined.extend(generate_crossplatform_search_hubs(query, city=city))
     return combined
 

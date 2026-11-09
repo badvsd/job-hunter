@@ -387,6 +387,19 @@ a{color:var(--clay);text-decoration:none}
   font-size:14.5px;line-height:1.55;color:var(--ink);
 }
 .ta:focus{border-color:var(--sage-line);background:var(--surface)}
+/* поле ввода .inp (раньше стиля не было → белый фон браузера + светлый текст в тёмной теме) */
+.inp{
+  width:100%;height:46px;padding:0 14px;border-radius:14px;
+  background:var(--surface-2);border:1px solid var(--line);outline:none;
+  font-size:15px;color:var(--ink);caret-color:var(--clay);
+}
+.inp:focus{border-color:var(--sage-line);background:var(--surface)}
+.inp::placeholder,.ta::placeholder{color:var(--ink-3);opacity:1}
+html{color-scheme:light}
+html[data-theme="dark"]{color-scheme:dark}
+:where(input,textarea,select){background-color:var(--surface-2);color:var(--ink)}
+select option{background:var(--surface);color:var(--ink)}
+input:-webkit-autofill{-webkit-text-fill-color:var(--ink);box-shadow:0 0 0 1000px var(--surface) inset}
 .field-label{font-size:11px;letter-spacing:.09em;text-transform:uppercase;color:var(--ink-3);font-weight:700;padding:0 3px}
 .prose{
   font-size:14px;line-height:1.62;color:var(--ink);white-space:pre-wrap;word-break:break-word;
@@ -2193,7 +2206,7 @@ a{color:var(--clay);text-decoration:none}
           '<div class="tiny" style="display:flex;justify-content:space-between;gap:8px"><span>' + esc(v.platform) + '</span><span>' + esc(v.trust_badge || '') + '</span></div>' +
           '<b style="font-size:13.5px;display:block;line-height:1.35;margin-top:4px">' + esc(v.title || 'Пост о найме') + '</b>' +
           '<div class="tiny" style="margin-top:3px">' + esc(v.company || '') + (v.published_at ? ' · ' + esc(v.published_at) : '') + '</div>' +
-          '<div class="tiny" style="margin-top:5px;color:var(--muted)">' + esc((v.description || '').slice(0, 170)) + '…</div>' +
+          '<div class="tiny" style="margin-top:5px;color:var(--ink-2)">' + esc((v.description || '').slice(0, 170)) + '…</div>' +
           '<div style="display:flex;gap:6px;margin-top:9px">' +
           '<button class="btn-soft" data-soc-open="' + esc(v.url || '') + '" style="height:32px;font-size:12px">Открыть пост</button>' +
           '<button class="btn-soft" data-soc-scam="' + esc(v.platform + '\n' + (v.company || '') + '\n' + (v.title || '') + ' ' + (v.description || '').slice(0, 200)) + '" style="height:32px;font-size:12px">Щит</button>' +
