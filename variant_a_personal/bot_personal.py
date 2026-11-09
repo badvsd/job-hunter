@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import asyncio
+import html
 import json
 import logging
 import os
@@ -363,7 +364,7 @@ def format_vacancy_card(v: Vacancy, idx: int, total: int) -> str:
     if v.trust_flags:
         flags_block = "\n\n<b>⚠️ Флаги безопасности:</b>\n" + "\n".join(f"• {f}" for f in v.trust_flags)
 
-    inn_line = f"\n<b>ИНН юрлица:</b> <code>{v.inn}</code>" if v.inn else ""
+    inn_line = f"\n<b>ИНН юрлица:</b> {v.inn}" if v.inn else ""
     contact_line = f"\n<b>Контакт:</b> {v.contact}" if v.contact else ""
     city_line = f" ({v.city})" if v.city else ""
 
@@ -395,7 +396,7 @@ async def cmd_start(message: Message, state: FSMContext) -> None:
         "• 📄 <b>ИИ-редактор резюме:</b> точечная адаптация вашего резюме под конкретную вакансию без выдумывания фактов.\n"
         "• ✉️ <b>Умные сопроводительные:</b> живые отклики и короткие питчи для мессенджеров.\n"
         "• 🛡 <b>Антифрод-проверка работодателя:</b> проверка ИНН, судов, отзывов и детектор скам-схем (дроппинг, залоги, фейки).\n\n"
-        f"📌 <b>Текущий поисковый запрос:</b> <code>{prof['search_query']}</code> ({prof['city']})\n"
+        f"📌 <b>Текущий поисковый запрос:</b> {prof['search_query']} ({prof['city']})\n"
         f"📄 <b>Базовое резюме:</b> {has_resume}\n"
         f"{app_hint}\n"
         "Выберите действие на клавиатуре ниже 👇",
@@ -514,7 +515,7 @@ async def cb_deck_actions(call: CallbackQuery) -> None:
         await call.message.answer(
             f"✉️ <b>Готовое сопроводительное письмо под «{v.title}» ({v.company}):</b>\n"
             f"🎯 <i>Автовыбор резюме: {best_var['label']} ({match['match_score']}% совпадение)</i>\n\n"
-            f"<code>{letter}</code>\n\n"
+            f"{html.escape(letter)}\n\n"
             "💡 <i>Нажмите на текст письма, чтобы скопировать его в буфер обмена в 1 клик.</i>"
         )
 
@@ -535,7 +536,7 @@ async def cb_deck_actions(call: CallbackQuery) -> None:
         fact_check = verify_resume_facts(resume_text, adapted, vac_info)
         await call.message.answer(
             f"🎯 <b>Адаптация вашего резюме под вакансию «{v.title}» ({v.company}):</b>\n"
-            f"🏆 <b>Лучшая A/B-копия:</b> {best_var['label']} — <code>{best_var['title']}</code> ({match['match_score']}%)\n"
+            f"🏆 <b>Лучшая A/B-копия:</b> {best_var['label']} — {best_var['title']} ({match['match_score']}%)\n"
             f"🛡 <b>Сверка фактов:</b> {fact_check['badge']}\n\n{adapted}"
         )
 
@@ -613,7 +614,7 @@ async def menu_scam_check(message: Message, state: FSMContext) -> None:
     await message.answer(
         "🛡 <b>Служба Безопасности и Антифрод-проверка работодателя</b>\n\n"
         "Отправьте мне <b>любые данные</b> для пробива:\n"
-        "• <b>ИНН</b> (10 или 12 цифр) или <b>название компании</b> (например: <code>ООО Ромашка</code> или <code>7736207543</code>)\n"
+        "• <b>ИНН</b> (10 или 12 цифр) или <b>название компании</b> (например: ООО Ромашка или 7736207543)\n"
         "• <b>Текст подозрительной вакансии</b> с Авито / ВК / Telegram\n"
         "• <b>Переписку с рекрутером</b> (перешлите сообщение сюда)\n\n"
         "Я проверю контрольную сумму ИНН ФНС, карточку на HH.ru, прогоню через детектор мошеннических схем (дроппинг, залоги, обратный выкуп, серые схемы) и подготовлю прямые ссылки на ЕГРЮЛ, Арбитражные суды и ФССП."
@@ -689,7 +690,7 @@ async def cb_res_ab_gen(call: CallbackQuery) -> None:
             fact_badge=built["fact_badge"],
         )
         lines.append(
-            f"• <b>{built['label']}</b> — <code>{built['title']}</code>\n"
+            f"• <b>{built['label']}</b> — {built['title']}\n"
             f"  🛡 <i>{built['fact_badge']}</i>"
         )
     lines.append("\n💡 <i>Теперь при каждом отклике или генерации письма автоматически выбирается лучшая копия под конкретную вакансию.</i>")
@@ -708,7 +709,7 @@ async def cb_res_ab_list(call: CallbackQuery) -> None:
         meta = RESUME_FOCUSES.get(str(v.get("focus") or "ats"), RESUME_FOCUSES["ats"])
         lines.append(
             f"<b>{meta['label']}</b>\n"
-            f"📌 Заголовок: <code>{v['title']}</code>\n"
+            f"📌 Заголовок: {v['title']}\n"
             f"🛡 Сверка фактов: <i>{v['fact_badge']}</i> | Откликов: <b>{v.get('used_count', 0)}</b>\n"
         )
     await call.message.answer("\n".join(lines))
@@ -825,7 +826,7 @@ async def process_custom_letter(message: Message, state: FSMContext) -> None:
         tone=prof.get("tone", "natural"),
     )
     await w.edit_text(
-        f"✉️ <b>Готовое сопроводительное письмо:</b>\n\n<code>{letter}</code>\n\n"
+        f"✉️ <b>Готовое сопроводительное письмо:</b>\n\n{html.escape(letter)}\n\n"
         "💡 <i>Нажмите на блок с текстом, чтобы скопировать его.</i>"
     )
 
@@ -868,13 +869,13 @@ async def cb_settings(call: CallbackQuery, state: FSMContext) -> None:
 
     if what == "query":
         await state.set_state(Form.waiting_search_query)
-        await call.message.answer("🎯 Введите вашу желаемую должность / стек (например: <code>Frontend React</code> или <code>Бухгалтер удаленно</code>):")
+        await call.message.answer("🎯 Введите вашу желаемую должность / стек (например: Frontend React или Бухгалтер удаленно):")
     elif what == "city":
         await state.set_state(Form.waiting_city)
-        await call.message.answer("📍 Введите город поиска (или напишите <code>Удаленно</code> / <code>Россия</code>):")
+        await call.message.answer("📍 Введите город поиска (или напишите Удаленно / Россия):")
     elif what == "salary":
         await state.set_state(Form.waiting_min_salary)
-        await call.message.answer("💰 Введите минимальную желаемую зарплату в рублях (только число, например <code>150000</code>, или <code>0</code> чтобы не ограничивать):")
+        await call.message.answer("💰 Введите минимальную желаемую зарплату в рублях (только число, например 150000, или 0 чтобы не ограничивать):")
     elif what == "tone":
         order = ["natural", "pro", "short_tg"]
         cur = prof.get("tone", "natural")
@@ -884,7 +885,7 @@ async def cb_settings(call: CallbackQuery, state: FSMContext) -> None:
     elif what == "channels":
         await state.set_state(Form.waiting_tg_channels)
         await call.message.answer(
-            f"📡 <b>Текущие Telegram-каналы для парсинга:</b>\n<code>{prof['tg_channels']}</code>\n\n"
+            f"📡 <b>Текущие Telegram-каналы для парсинга:</b>\n{prof['tg_channels']}\n\n"
             "Отправьте новый список публичных каналов через запятую (без @),\n"
             "или верните стандартный список одной кнопкой:",
             reply_markup=InlineKeyboardMarkup(
@@ -900,7 +901,7 @@ async def cb_settings(call: CallbackQuery, state: FSMContext) -> None:
         prof = db.get_profile(uid)
         await call.message.answer(
             f"✅ Каналы сброшены к стандартному списку (включая вакансии юристов):\n"
-            f"<code>{prof['tg_channels']}</code>",
+            f"{prof['tg_channels']}",
             reply_markup=settings_kb(prof),
         )
     elif what == "channels_cancel":
@@ -951,7 +952,7 @@ async def save_channels(message: Message, state: FSMContext) -> None:
     if raw:
         db.update_field(message.from_user.id, "tg_channels", raw)
     prof = db.get_profile(message.from_user.id)
-    await message.answer(f"✅ Каналы обновлены: <code>{prof['tg_channels']}</code>", reply_markup=settings_kb(prof))
+    await message.answer(f"✅ Каналы обновлены: {prof['tg_channels']}", reply_markup=settings_kb(prof))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
