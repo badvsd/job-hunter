@@ -343,6 +343,11 @@ _HH_AREAS = {
 }
 _REMOTE_WORDS = ("удален", "удалён", "remote", "дистанц")
 
+# Area-id стран СНГ для региона «СНГ»: HH допускает несколько area в одном запросе.
+CIS_AREA_IDS = [113, 5, 40, 9, 16, 28, 48, 97]  # РФ, Украина, Казахстан, Азербайджан, Беларусь, Грузия, Кыргызстан, Узбекистан
+# Area-id российских городов: для региона «СНГ» они означают «искать по всей сетке», а не по одному городу.
+_RU_CITY_AREAS = {1, 2, 3, 4, 66, 88}
+
 # ─────────────────────────────────────────────────────────────────────────
 # ГЕО-РЕГИОНЫ ПОИСКА (география определяет набор источников)
 # Ключ geo хранится в профиле пользователя. 'ru' — поведение «как раньше».
@@ -399,6 +404,25 @@ def geo_city(geo: str, city: str) -> str:
 _HH_SALARY_RE = re.compile(
     r"(?:(?:от|до)\s+)?\d[\d\s\u00a0\u202f]*(?:[–—-]\s*\d[\d\s\u00a0\u202f]*)?\s*[₽$€]\s*(?:за\s+\w+|на руки)?"
 )
+
+
+def cis_areas(city: str = "") -> List[int]:
+    """Area-id для региона «СНГ».
+
+    Конкретный город СНГ (Минск, Алматы, Тбилиси...) — ищем по его area.
+    Российский город (Москва) или пустое поле — по всей сетке стран СНГ,
+    а не по одной Москве.
+    """
+    c = (city or "").strip().lower()
+    if c and c in _HH_AREAS:
+        area = _HH_AREAS[c]
+        # Страна СНГ (Беларусь, Казахстан...) — ищем по ней целиком.
+        if area in CIS_AREA_IDS and area != 113:
+            return [area]
+        # Город СНГ, а не российский город — ищем по городу.
+        if area not in _RU_CITY_AREAS:
+            return [area]
+    return list(CIS_AREA_IDS)
 
 
 def _hh_location(city: str) -> Tuple[Dict[str, Any], str]:
@@ -463,12 +487,22 @@ def _parse_hh_cards(page_html: str, fallback_city: str) -> Tuple[int, List[Vacan
     return len(cards), out
 
 
-async def _search_hh_html(query: str, city: str = "", limit: int = 50, min_salary: int = 0) -> List[Vacancy]:
+async def _search_hh_html(
+    query: str,
+    city: str = "",
+    limit: int = 50,
+    min_salary: int = 0,
+    areas: Optional[List[int]] = None,
+) -> List[Vacancy]:
     """
     Резервный парсер публичной HTML-выдачи hh.ru (когда API отдаёт 403 без OAuth).
     Листает страницы по 50 карточек (до 40 страниц ≈ 2000 вакансий — предел hh).
     """
-    extra, suffix = _hh_location(city)
+    if areas:
+        extra: Dict[str, Any] = {"area": list(areas)}
+        suffix = ""
+    else:
+        extra, suffix = _hh_location(city)
     base: Dict[str, Any] = {
         "text": f"{query} {suffix}".strip(),
         "items_on_page": HH_PAGE_SIZE,
@@ -533,13 +567,26 @@ async def _search_hh_html(query: str, city: str = "", limit: int = 50, min_salar
     return out[:limit]
 
 
-async def search_hh(query: str, city: str = "", min_salary: int = 0, limit: int = 50) -> List[Vacancy]:
-    """Поиск hh.ru: сначала публичный API (до 100 на страницу), при отказе — HTML-выдача."""
+async def search_hh(
+    query: str,
+    city: str = "",
+    min_salary: int = 0,
+    limit: int = 50,
+    areas: Optional[List[int]] = None,
+) -> List[Vacancy]:
+    """Поиск hh.ru: сначала публичный API (до 100 на страницу), при отказе — HTML-выдача.
+
+    areas — явный список area-id (например, сетка стран СНГ). Если задан, город игнорируется.
+    """
     global _HH_API_BLOCKED_UNTIL
     if time.time() < _HH_API_BLOCKED_UNTIL:
-        return await _search_hh_html(query, city=city, limit=limit, min_salary=min_salary)
+        return await _search_hh_html(query, city=city, limit=limit, min_salary=min_salary, areas=areas)
 
-    extra, suffix = _hh_location(city)
+    if areas:
+        extra: Dict[str, Any] = {"area": list(areas)}
+        suffix = ""
+    else:
+        extra, suffix = _hh_location(city)
     per_page = max(1, min(100, limit))
     params: Dict[str, Any] = {
         "text": f"{query} {suffix}".strip(),
@@ -564,7 +611,7 @@ async def search_hh(query: str, city: str = "", min_salary: int = 0, limit: int 
                     log.warning("hh api: HTTP %s на странице %s -> HTML-фолбэк", r.status_code, page)
                     if page == 0:
                         _HH_API_BLOCKED_UNTIL = time.time() + 600
-                        return await _search_hh_html(query, city=city, limit=limit, min_salary=min_salary)
+                        return await _search_hh_html(query, city=city, limit=limit, min_salary=min_salary, areas=areas)
                     break
                 data = r.json()
                 total_pages = int(data.get("pages") or 1)
@@ -596,7 +643,7 @@ async def search_hh(query: str, city: str = "", min_salary: int = 0, limit: int 
                 page += 1
     except Exception:  # noqa: BLE001
         log.exception("hh api: сбой -> HTML-фолбэк")
-        return await _search_hh_html(query, city=city, limit=limit, min_salary=min_salary)
+        return await _search_hh_html(query, city=city, limit=limit, min_salary=min_salary, areas=areas)
     LAST_SEARCH_STATS["hh_api"] = {"count": len(out), "status": "ok"}
     log.info("hh api: query=%r city=%r -> %d", query, city, len(out))
     return out[:limit]
@@ -1038,16 +1085,21 @@ async def search_all_platforms(
     tasks: List[Any] = []
     if gcfg["world"] or gcfg["ngo"]:
         # Глобальный режим: соцпоиск (Reddit, Bluesky, Mastodon, HN, RemoteOK, Discord) + живой HH по удалёнке.
+        # Город из профиля не передаём: «Москва» в международном запросе даёт мусор вместо мировых вакансий.
         names = ["social", "hh_remote"]
         tasks = [
-            search_social_networks(query, city=city, limit_per_network=3),
+            search_social_networks(query, city="", limit_per_network=3),
             search_hh(query, city="удалённо", min_salary=min_salary, limit=min(total, 100)),
         ]
     else:
         names = ["hh", "telegram"]
-        hh_city = geo_city(geo, city)
+        if geo == "cis":
+            # СНГ: один запрос HH сразу по сетке стран (или по конкретному городу СНГ из профиля).
+            hh_city, hh_areas = "", cis_areas(city)
+        else:
+            hh_city, hh_areas = geo_city(geo, city), None
         tasks = [
-            search_hh(query, city=hh_city, min_salary=min_salary, limit=total),
+            search_hh(query, city=hh_city, min_salary=min_salary, limit=total, areas=hh_areas),
             search_telegram_channels(query, channels=tg_channels, limit=total),
         ]
         # Страны СНГ берём из HH по area; Трудвсем (Работа России) подключаем только для РФ (ru).

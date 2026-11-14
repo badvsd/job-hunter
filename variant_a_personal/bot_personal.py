@@ -57,9 +57,11 @@ from shared_engine import (
     Vacancy,
     adapt_resume_for_vacancy,
     build_resume_variant,
+    cis_areas,
     deep_check_employer,
     extract_text_from_pdf_bytes,
     generate_cover_letter,
+    geo_city,
     geo_label,
     pick_best_resume_variant,
     search_all_platforms,
@@ -455,18 +457,29 @@ async def cb_run_search(call: CallbackQuery) -> None:
     )
 
     if src == "hh":
-        hh_city = "удалённо" if global_mode else city
-        items = await search_hh(q, city=hh_city, min_salary=sal, limit=10)
+        if global_mode:
+            hh_city, hh_areas = "удалённо", None
+        elif geo == "cis":
+            hh_city, hh_areas = "", cis_areas(city)
+        else:
+            hh_city, hh_areas = geo_city(geo, city), None
+        items = await search_hh(q, city=hh_city, min_salary=sal, limit=10, areas=hh_areas)
     elif src == "tg":
         items = await search_telegram_channels(q, channels=channels, limit=10)
     elif src == "tv":
-        items = await search_trudvsem(f"{q} {city}".strip(), limit=10)
+        if geo != "ru":
+            # «Работа России» — российская база. Для остальных гео честно ищем на HH по выбранному региону.
+            await call.answer("«Работа России» — только для РФ. Ищу на HH по вашему гео.", show_alert=True)
+            hh_city = "удалённо" if global_mode else geo_city(geo, city)
+            items = await search_hh(q, city=hh_city, min_salary=sal, limit=10)
+        else:
+            items = await search_trudvsem(f"{q} {city}".strip(), limit=10)
     elif src == "hubs":
         from shared_engine import generate_crossplatform_search_hubs, generate_global_hubs
         if global_mode:
             items = generate_global_hubs(q, geo=geo)
         else:
-            items = generate_crossplatform_search_hubs(q, city=city)
+            items = generate_crossplatform_search_hubs(q, city=geo_city(geo, city))
     else:
         items = await search_all_platforms(q, city=city, min_salary=sal, tg_channels=channels, geo=geo)
 
@@ -603,7 +616,9 @@ async def process_social_search(message: Message, state: FSMContext) -> None:
         await message.answer("Слишком короткий запрос. Например: «Python разработчик».")
         return
     prof = db.get_profile(message.from_user.id)
-    city = prof.get("city") or ""
+    geo = (prof.get("geo") or "ru").strip().lower()
+    # Для мировых регионов город из профиля не подмешиваем: «Москва» сужает мировой поиск.
+    city = "" if geo in ("eu", "world", "ngo") else (prof.get("city") or "")
     w = await message.answer(
         f"🌐 <b>Облетаю соцсети по запросу «{query}»…</b>\n"
         "Telegram, Reddit, Discord, Bluesky, Mastodon, Hacker News, RemoteOK + шлюзы в закрытые сети."
@@ -620,7 +635,6 @@ async def process_social_search(message: Message, state: FSMContext) -> None:
         lines.append("\n🔗 <b>Шлюзы в закрытые сети:</b>")
         for h in hubs[:6]:
             lines.append(f"• <b>{h['platform']}</b> — {h['url']}")
-    geo = (prof.get("geo") or "ru").strip().lower()
     if geo in ("eu", "world", "ngo"):
         from shared_engine import generate_global_hubs
         ghubs = generate_global_hubs(query, geo=geo)
@@ -913,7 +927,8 @@ async def cb_settings(call: CallbackQuery, state: FSMContext) -> None:
             "🌍 <b>Гео-регион поиска</b>\n\n"
             "Регион сам подбирает источники:\n"
             "• 🇷🇺 Россия — HH.ru + Работа России (ИНН) + Telegram (как раньше).\n"
-            "• 🇧🇾 Беларусь / 🇰🇿 Казахстан / 🗺 СНГ — HH.ru по стране + Telegram, соцсети.\n"
+            "• 🇧🇾 Беларусь / 🇰🇿 Казахстан — HH.ru по стране + Telegram, соцсети.\n"
+            "• 🗺 СНГ — HH.ru сразу по сетке стран СНГ (или по вашему городу) + Telegram.\n"
             "• 🇪🇺 ЕС / 🌍 Весь мир — соцсети и комьюнити + международные площадки (Indeed, EURES, RemoteOK, We Work Remotely, Glassdoor).\n"
             "• 🤝 НКО и фонды — Idealist, ReliefWeb, UNjobs, Impactpool.\n\n"
             "Выберите регион:",
