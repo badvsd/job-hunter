@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 from .engine import (
     DEFAULT_TG_CHANNELS,
+    GEO_CONFIG,
+    GEO_ORDER,
     RESUME_FOCUSES,
     QuickScamFilter,
     Vacancy,
@@ -10,6 +12,9 @@ from .engine import (
     extract_text_from_pdf_bytes,
     generate_cover_letter,
     generate_crossplatform_search_hubs,
+    generate_global_hubs,
+    geo_city,
+    geo_label,
     llm,
     pick_best_resume_variant,
     search_all_platforms,
@@ -26,6 +31,8 @@ from .social_search import (
 
 __all__ = [
     "DEFAULT_TG_CHANNELS",
+    "GEO_CONFIG",
+    "GEO_ORDER",
     "RESUME_FOCUSES",
     "QuickScamFilter",
     "SOCIAL_NETWORKS",
@@ -36,7 +43,10 @@ __all__ = [
     "extract_text_from_pdf_bytes",
     "generate_cover_letter",
     "generate_crossplatform_search_hubs",
+    "generate_global_hubs",
     "generate_social_hubs",
+    "geo_city",
+    "geo_label",
     "llm",
     "pick_best_resume_variant",
     "search_all_platforms",

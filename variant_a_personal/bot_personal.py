@@ -51,6 +51,8 @@ if str(ROOT_DIR) not in sys.path:
 
 from shared_engine import (
     DEFAULT_TG_CHANNELS,
+    GEO_CONFIG,
+    GEO_ORDER,
     RESUME_FOCUSES,
     Vacancy,
     adapt_resume_for_vacancy,
@@ -58,6 +60,7 @@ from shared_engine import (
     deep_check_employer,
     extract_text_from_pdf_bytes,
     generate_cover_letter,
+    geo_label,
     pick_best_resume_variant,
     search_all_platforms,
     search_hh,
@@ -99,7 +102,8 @@ class PersonalDB:
                     min_salary INTEGER DEFAULT 0,
                     tone TEXT DEFAULT 'natural',
                     tg_channels TEXT DEFAULT '',
-                    autopilot INTEGER DEFAULT 0
+                    autopilot INTEGER DEFAULT 0,
+                    geo TEXT DEFAULT 'ru'
                 )
                 """
             )
@@ -121,9 +125,13 @@ class PersonalDB:
             )
             # Мягкая миграция: профиль из Telegram Mini App
             cols = {row["name"] for row in c.execute("PRAGMA table_info(profile)").fetchall()}
-            for column in ("tg_username", "tg_name"):
+            for column, ddl in (
+                ("tg_username", "TEXT DEFAULT ''"),
+                ("tg_name", "TEXT DEFAULT ''"),
+                ("geo", "TEXT DEFAULT 'ru'"),
+            ):
                 if column not in cols:
-                    c.execute(f"ALTER TABLE profile ADD COLUMN {column} TEXT DEFAULT ''")
+                    c.execute(f"ALTER TABLE profile ADD COLUMN {column} {ddl}")
 
             # До 5 A/B-копий резюме под разные направления и акценты (цифры, стек, команда, продукт, ATS)
             c.execute(
@@ -335,6 +343,14 @@ def deck_card_kb(idx: int, total: int, url: str) -> InlineKeyboardMarkup:
     )
 
 
+def geo_picker_kb(current: str = "ru") -> InlineKeyboardMarkup:
+    rows = []
+    for key in GEO_ORDER:
+        mark = "✅ " if key == current else ""
+        rows.append([InlineKeyboardButton(text=f"{mark}{GEO_CONFIG[key]['label']}", callback_data=f"geo:{key}")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
 def settings_kb(prof: Dict[str, Any]) -> InlineKeyboardMarkup:
     tone_map = {"natural": "Живой (Сизиф)", "pro": "Строго деловой", "short_tg": "Короткий питч (TG/ВК/Авито)"}
     ap_status = "🟢 ВКЛ" if prof.get("autopilot") else "⚪ ВЫКЛ"
@@ -345,6 +361,7 @@ def settings_kb(prof: Dict[str, Any]) -> InlineKeyboardMarkup:
                 InlineKeyboardButton(text=f"📍 Город: {prof['city']}", callback_data="set:city"),
                 InlineKeyboardButton(text=f"💰 Мин. ЗП: {prof['min_salary']} ₽", callback_data="set:salary"),
             ],
+            [InlineKeyboardButton(text=f"🌍 Гео-регион: {geo_label(prof.get('geo') or 'ru')}", callback_data="set:geo")],
             [InlineKeyboardButton(text=f"🗣 Тон писем: {tone_map.get(prof['tone'], 'Живой')}", callback_data="set:tone")],
             [InlineKeyboardButton(text="📡 Список Telegram-каналов для парсинга", callback_data="set:channels")],
             [InlineKeyboardButton(text=f"🤖 Фоновый Автопилот: {ap_status}", callback_data="set:autopilot")],
@@ -428,23 +445,30 @@ async def cb_run_search(call: CallbackQuery) -> None:
     city = prof["city"]
     sal = int(prof.get("min_salary") or 0)
     channels = [c.strip().lstrip("@") for c in (prof.get("tg_channels") or "").split(",") if c.strip()]
+    geo = (prof.get("geo") or "ru").strip().lower() or "ru"
+    gcfg = GEO_CONFIG.get(geo, GEO_CONFIG["ru"])
+    global_mode = bool(gcfg.get("world") or gcfg.get("ngo"))
 
     await call.message.edit_text(
         f"⏳ <b>Запускаю парсеры и антифрод-фильтр по запросу «{q}»...</b>\n"
-        "Опрашиваем площадки и проверяем работодателей..."
+        f"🌍 Гео: {geo_label(geo)}. Опрашиваем площадки и проверяем работодателей..."
     )
 
     if src == "hh":
-        items = await search_hh(q, city=city, min_salary=sal, limit=10)
+        hh_city = "удалённо" if global_mode else city
+        items = await search_hh(q, city=hh_city, min_salary=sal, limit=10)
     elif src == "tg":
         items = await search_telegram_channels(q, channels=channels, limit=10)
     elif src == "tv":
         items = await search_trudvsem(f"{q} {city}".strip(), limit=10)
     elif src == "hubs":
-        from shared_engine import generate_crossplatform_search_hubs
-        items = generate_crossplatform_search_hubs(q, city=city)
+        from shared_engine import generate_crossplatform_search_hubs, generate_global_hubs
+        if global_mode:
+            items = generate_global_hubs(q, geo=geo)
+        else:
+            items = generate_crossplatform_search_hubs(q, city=city)
     else:
-        items = await search_all_platforms(q, city=city, min_salary=sal, tg_channels=channels)
+        items = await search_all_platforms(q, city=city, min_salary=sal, tg_channels=channels, geo=geo)
 
     if not items:
         await call.message.edit_text(
@@ -596,6 +620,14 @@ async def process_social_search(message: Message, state: FSMContext) -> None:
         lines.append("\n🔗 <b>Шлюзы в закрытые сети:</b>")
         for h in hubs[:6]:
             lines.append(f"• <b>{h['platform']}</b> — {h['url']}")
+    geo = (prof.get("geo") or "ru").strip().lower()
+    if geo in ("eu", "world", "ngo"):
+        from shared_engine import generate_global_hubs
+        ghubs = generate_global_hubs(query, geo=geo)
+        if ghubs:
+            lines.append("\n🌍 <b>Международные и НКО-площадки:</b>")
+            for h in ghubs[:8]:
+                lines.append(f"• <b>{h.platform}</b> — {h.url}")
     if not live and not hubs:
         lines.append("😕 Свежих вакансий в соцсетях пока не нашлось. Попробуйте другой запрос.")
     lines.append("\n💡 <i>Живые посты уже пропущены через антифрод-фильтр. Шлюзы открывайте с осторожностью.</i>")
@@ -856,6 +888,9 @@ async def menu_settings(message: Message) -> None:
     prof = db.get_profile(message.from_user.id)
     await message.answer(
         "⚙️ <b>Настройки вашего поискового агента</b>\n\n"
+        f"🌍 Текущий гео-регион: <b>{geo_label(prof.get('geo') or 'ru')}</b>\n"
+        "Он определяет источники: РФ/СНГ — HH.ru и Telegram, ЕС/Мир — международные площадки, "
+        "НКО — профильные фонды и миссии.\n\n"
         "Нажмите на любой параметр ниже, чтобы изменить его:",
         reply_markup=settings_kb(prof),
     )
@@ -873,6 +908,17 @@ async def cb_settings(call: CallbackQuery, state: FSMContext) -> None:
     elif what == "city":
         await state.set_state(Form.waiting_city)
         await call.message.answer("📍 Введите город поиска (или напишите Удаленно / Россия):")
+    elif what == "geo":
+        await call.message.answer(
+            "🌍 <b>Гео-регион поиска</b>\n\n"
+            "Регион сам подбирает источники:\n"
+            "• 🇷🇺 Россия — HH.ru + Работа России (ИНН) + Telegram (как раньше).\n"
+            "• 🇧🇾 Беларусь / 🇰🇿 Казахстан / 🗺 СНГ — HH.ru по стране + Telegram, соцсети.\n"
+            "• 🇪🇺 ЕС / 🌍 Весь мир — соцсети и комьюнити + международные площадки (Indeed, EURES, RemoteOK, We Work Remotely, Glassdoor).\n"
+            "• 🤝 НКО и фонды — Idealist, ReliefWeb, UNjobs, Impactpool.\n\n"
+            "Выберите регион:",
+            reply_markup=geo_picker_kb(prof.get("geo") or "ru"),
+        )
     elif what == "salary":
         await state.set_state(Form.waiting_min_salary)
         await call.message.answer("💰 Введите минимальную желаемую зарплату в рублях (только число, например 150000, или 0 чтобы не ограничивать):")
@@ -913,6 +959,23 @@ async def cb_settings(call: CallbackQuery, state: FSMContext) -> None:
         await call.message.edit_reply_markup(reply_markup=settings_kb(db.get_profile(uid)))
         await call.answer("Автопилот включён!" if new_val else "Автопилот поставлен на паузу.")
     await call.answer()
+
+
+@router.callback_query(F.data.startswith("geo:"))
+async def cb_set_geo(call: CallbackQuery, state: FSMContext) -> None:
+    key = call.data.split(":", 1)[1]
+    if key not in GEO_CONFIG:
+        await call.answer("Неизвестный регион")
+        return
+    uid = call.from_user.id
+    db.update_field(uid, "geo", key)
+    prof = db.get_profile(uid)
+    await call.message.edit_text(
+        f"✅ Гео-регион: <b>{geo_label(key)}</b>\n\n"
+        "Поиск и карточки будут учитывать выбранный регион. Настройки ниже:",
+        reply_markup=settings_kb(prof),
+    )
+    await call.answer(f"Гео: {geo_label(key)}")
 
 
 @router.message(Form.waiting_search_query)

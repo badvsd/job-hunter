@@ -332,8 +332,68 @@ _HH_HTML_HEADERS = {
 _HH_AREAS = {
     "москва": 1, "санкт-петербург": 2, "спб": 2, "питер": 2, "екатеринбург": 3,
     "новосибирск": 4, "нижний новгород": 66, "казань": 88, "россия": 113, "вся россия": 113,
+    # Страны СНГ (area-id из api.hh.ru/areas, top-level)
+    "беларусь": 16, "рб": 16, "минск": 276,
+    "казахстан": 40, "кз": 40, "алматы": 202, "астана": 159,
+    "азербайджан": 9, "баку": 74,
+    "грузия": 28, "тбилиси": 1274,
+    "кыргызстан": 48, "киргизия": 48, "бишкек": 196,
+    "узбекистан": 97, "ташкент": 1660,
+    "украина": 5, "киев": 115,
 }
 _REMOTE_WORDS = ("удален", "удалён", "remote", "дистанц")
+
+# ─────────────────────────────────────────────────────────────────────────
+# ГЕО-РЕГИОНЫ ПОИСКА (география определяет набор источников)
+# Ключ geo хранится в профиле пользователя. 'ru' — поведение «как раньше».
+# ─────────────────────────────────────────────────────────────────────────
+
+GEO_CONFIG = {
+    "ru":   {"label": "🇷🇺 Россия",             "hh_area": 113, "cis": False, "world": False, "ngo": False},
+    "by":   {"label": "🇧🇾 Беларусь",           "hh_area": 16,  "cis": True,  "world": False, "ngo": False},
+    "kz":   {"label": "🇰🇿 Казахстан",          "hh_area": 40,  "cis": True,  "world": False, "ngo": False},
+    "cis":  {"label": "🗺 СНГ (все страны)",     "hh_area": None, "cis": True, "world": False, "ngo": False},
+    "eu":   {"label": "🇪🇺 ЕС / Европа",        "hh_area": None, "cis": False, "world": True, "ngo": False},
+    "world": {"label": "🌍 Весь мир / Удалёнка", "hh_area": None, "cis": False, "world": True, "ngo": False},
+    "ngo":  {"label": "🤝 НКО и фонды",         "hh_area": None, "cis": False, "world": False, "ngo": True},
+}
+
+# Упорядоченный список для кнопок выбора гео.
+GEO_ORDER = ["ru", "by", "kz", "cis", "eu", "world", "ngo"]
+
+
+def geo_label(geo: str) -> str:
+    return GEO_CONFIG.get(geo or "", GEO_CONFIG["ru"])["label"]
+
+
+# Города/токены, допустимые для региона с фиксированной страной, и страна по умолчанию.
+GEO_CITY_HINTS = {
+    "ru": ("россия", "вся россия", "москва", "санкт-петербург", "спб", "питер",
+           "екатеринбург", "новосибирск", "нижний новгород", "казань",
+           "удален", "удалён", "remote", "дистанц"),
+    "by": ("беларусь", "рб", "минск"),
+    "kz": ("казахстан", "кз", "алматы", "астана"),
+}
+GEO_DEFAULT_CITY = {"ru": "Россия", "by": "Беларусь", "kz": "Казахстан", "cis": ""}
+
+
+def geo_city(geo: str, city: str) -> str:
+    """Город под регион: если для «страны» введён чужой город, подставляем страну.
+
+    Пример: гео=by, а в профиле осталось «Москва» → ищем по Беларуси, а не по РФ.
+    Если город относится к выбранной стране (Минск) или это удалёнка — не трогаем.
+    """
+    c = (city or "").strip()
+    g = (geo or "ru").strip().lower()
+    hints = GEO_CITY_HINTS.get(g)
+    if not hints:
+        return c
+    if not c:
+        return GEO_DEFAULT_CITY.get(g, c)
+    cl = c.lower()
+    if any(x in cl for x in hints):
+        return c
+    return GEO_DEFAULT_CITY.get(g, c)
 
 
 _HH_SALARY_RE = re.compile(
@@ -852,23 +912,150 @@ def generate_crossplatform_search_hubs(query: str, city: str = "") -> List[Vacan
     return hubs
 
 
+def generate_global_hubs(query: str, geo: str = "") -> List[Vacancy]:
+    """Прямые поисковые шлюзы в зарубежные и НКО-площадки (по выбранному гео).
+
+    Возвращает список Vacancy-«ссылок» (это не вакансии, а удобные точки входа),
+    которые добавляются к результатам поиска для регионов eu / world / ngo.
+    Для других регионов вернёт пустой список.
+    """
+    geo = (geo or "").strip().lower()
+    q_enc = quote_plus(query)
+
+    hubs: List[Vacancy] = []
+    if geo in ("eu", "world"):
+        hubs += [
+            Vacancy(
+                id="g_remoteok", platform="RemoteOK",
+                title=f"Удалённые вакансии «{query}» на RemoteOK",
+                company="Глобальная доска удалённых IT-вакансий",
+                salary="Доллары / Евро",
+                url=f"https://remoteok.com/remote-jobs?search={q_enc}",
+                description="Мировые удалённые позиции (IT, маркетинг, поддержка, дизайн) с зарплатой в валюте.",
+                trust_score=80, trust_badge="🟢 Проверенная площадка",
+            ),
+            Vacancy(
+                id="g_we_work_remotely", platform="We Work Remotely",
+                title=f"Вакансии «{query}» на We Work Remotely",
+                company="Популярная доска удалёнки",
+                salary="Валюта",
+                url=f"https://weworkremotely.com/remote-jobs/search?term={q_enc}",
+                description="Удалённые позиции по всему миру, в том числе не-IT (поддержка, продажи, контент).",
+                trust_score=80, trust_badge="🟢 Проверенная площадка",
+            ),
+            Vacancy(
+                id="g_indeed", platform="Indeed",
+                title=f"Вакансии «{query}» на Indeed (глобально)",
+                company="Крупнейшая мировая доска вакансий",
+                salary="Валюта",
+                url=f"https://www.indeed.com/jobs?q={q_enc}",
+                description="Международные вакансии; можно сменить страну (indeed.fr/.de/...) для целевого рынка.",
+                trust_score=82, trust_badge="🟢 Профессиональная площадка",
+            ),
+            Vacancy(
+                id="g_glassdoor", platform="Glassdoor",
+                title=f"Вакансии «{query}» на Glassdoor",
+                company="Доска вакансий + отзывы о работодателях",
+                salary="Валюта",
+                url=f"https://www.glassdoor.com/Job/jobs.htm?sc.keyword={q_enc}",
+                description="Вакансии за рубежом с информацией о зарплатах и рейтингах компаний.",
+                trust_score=80, trust_badge="🟢 Проверенная площадка",
+            ),
+            Vacancy(
+                id="g_eures", platform="EURES",
+                title=f"Вакансии «{query}» в ЕС через EURES",
+                company="Европейская служба занятости (ЕС)",
+                salary="Валюта",
+                url=f"https://eures.europa.eu/search?keyword={q_enc}",
+                description="Официальный портал ЕС: вакансии и работодатели по всей Европе.",
+                trust_score=85, trust_badge="🟢 Проверенная площадка",
+            ),
+        ]
+    if geo == "ngo":
+        hubs += [
+            Vacancy(
+                id="n_idealist", platform="Idealist",
+                title=f"В НКО и фонды: «{query}» на Idealist",
+                company="Миссии, НКО, фонды, стартапы смысла",
+                salary="Валюта / Гранты",
+                url=f"https://www.idealist.org/en/?type=JOB&q={q_enc}",
+                description="Вакансии в НКО, фонды и социальные проекты по всему миру.",
+                trust_score=82, trust_badge="🟢 Проверенная площадка",
+            ),
+            Vacancy(
+                id="n_reliefweb", platform="ReliefWeb",
+                title=f"Гуманитарные вакансии: «{query}» на ReliefWeb",
+                company="ООН и гуманитарные организации",
+                salary="Валюта",
+                url=f"https://reliefweb.int/jobs?q%5Btext%5D%5Bvalue%5D={q_enc}",
+                description="Гуманитарная помощь, ООН, международные миссии, экспертные позиции.",
+                trust_score=85, trust_badge="🟢 Официальный портал ООН",
+            ),
+            Vacancy(
+                id="n_unjobs", platform="UNjobs",
+                title=f"Вакансии «{query}» в системе ООН",
+                company="Организация Объединённых Наций",
+                salary="Валюта",
+                url=f"https://unjobs.org/vacancies?q={q_enc}",
+                description="Агрегатор вакансий ООН и её агентств (UNDP, UNICEF, WHO и др.).",
+                trust_score=85, trust_badge="🟢 Официальные организации",
+            ),
+            Vacancy(
+                id="n_impactpool", platform="Impactpool",
+                title=f"Позиции «{query}» на Impactpool",
+                company="Международные организации и НКО",
+                salary="Валюта",
+                url=f"https://www.impactpool.org/search?q={q_enc}",
+                description="Работа в международных организациях, НКО и миротворческих миссиях.",
+                trust_score=80, trust_badge="🟢 Проверенная площадка",
+            ),
+        ]
+    return hubs
+
+
 async def search_all_platforms(
     query: str,
     city: str = "",
     min_salary: int = 0,
     tg_channels: Optional[List[str]] = None,
     max_total: Optional[int] = None,
+    geo: str = "",
 ) -> List[Vacancy]:
-    """Параллельный мульти-поиск по всем площадкам Рунета (до max_total вакансий, по умолчанию 1000)."""
+    """Параллельный мульти-поиск по всем площадкам (до max_total вакансий, по умолчанию 1000).
+
+    Параметр geo определяет набор источников:
+      - ru (по умолчанию) — Рунет: HH + Трудвсем (Работа России) + Telegram-каналы.
+      - by / kz / cis        — HH по стране + Telegram + соцсети (Трудвсем — только РФ, пропускаем).
+      - eu / world / ngo     — глобальный охват: соцсети + иностранные шлюзы (Indeed, EURES и др.),
+                               без Рунет-моноисточников, Трудвсем и российских шлюзов.
+    """
+    geo = (geo or "").strip().lower() or "ru"
+    gcfg = GEO_CONFIG.get(geo, GEO_CONFIG["ru"])
     total = max(1, max_total or SEARCH_MAX_TOTAL)
     t0 = time.time()
-    names = ["hh", "trudvsem", "telegram"]
-    results = await asyncio.gather(
-        search_hh(query, city=city, min_salary=min_salary, limit=total),
-        search_trudvsem(f"{query} {city}".strip(), limit=total),
-        search_telegram_channels(query, channels=tg_channels, limit=total),
-        return_exceptions=True,
-    )
+
+    names: List[str] = []
+    tasks: List[Any] = []
+    if gcfg["world"] or gcfg["ngo"]:
+        # Глобальный режим: соцпоиск (Reddit, Bluesky, Mastodon, HN, RemoteOK, Discord) + живой HH по удалёнке.
+        names = ["social", "hh_remote"]
+        tasks = [
+            search_social_networks(query, city=city, limit_per_network=3),
+            search_hh(query, city="удалённо", min_salary=min_salary, limit=min(total, 100)),
+        ]
+    else:
+        names = ["hh", "telegram"]
+        hh_city = geo_city(geo, city)
+        tasks = [
+            search_hh(query, city=hh_city, min_salary=min_salary, limit=total),
+            search_telegram_channels(query, channels=tg_channels, limit=total),
+        ]
+        # Страны СНГ берём из HH по area; Трудвсем (Работа России) подключаем только для РФ (ru).
+        if geo == "ru":
+            names.append("trudvsem")
+            tasks.append(search_trudvsem(f"{query} {city}".strip(), limit=total))
+
+    results = await asyncio.gather(*tasks, return_exceptions=True)
     groups: List[List[Vacancy]] = []
     counts: Dict[str, Any] = {}
     for name, res in zip(names, results):
@@ -876,9 +1063,17 @@ async def search_all_platforms(
             log.error("источник %s упал: %r", name, res)
             counts[name] = f"error:{type(res).__name__}"
             groups.append([])
-        else:
-            counts[name] = len(res)
-            groups.append(res)
+            continue
+        if name == "social":
+            # search_social_networks возвращает словарь, а не список: берём живые items.
+            res = res.get("items") or [] if isinstance(res, dict) else []
+        items: List[Vacancy] = []
+        for v in res:
+            if isinstance(v, dict):
+                v = Vacancy(**{k: val for k, val in v.items() if k in Vacancy.__dataclass_fields__})
+            items.append(v)
+        counts[name] = len(items)
+        groups.append(items)
 
     # Дедупликация + равномерное чередование источников, чтобы большой hh не вытеснил остальных.
     combined: List[Vacancy] = []
@@ -898,7 +1093,12 @@ async def search_all_platforms(
     log.info("поиск %r (%s): %s -> итого %d за %.1f c", query, city, counts, len(combined), time.time() - t0)
 
     # Кроссплатформенные шлюзы (Авито, ВК, ОК, Habr, SuperJob, LinkedIn, Instagram) — это ссылки, не вакансии.
-    combined.extend(generate_crossplatform_search_hubs(query, city=city))
+    # Шлюзы-«ссылки»: для глобальных/НКО-регионов — зарубежные и НКО-площадки,
+    # для остальных — привычные Рунет-шлюзы (Авито, ВК, ОК, Habr, SuperJob, LinkedIn, Instagram).
+    if gcfg["world"] or gcfg["ngo"]:
+        combined.extend(generate_global_hubs(query, geo=geo))
+    else:
+        combined.extend(generate_crossplatform_search_hubs(query, city=city))
     return combined
 
 
